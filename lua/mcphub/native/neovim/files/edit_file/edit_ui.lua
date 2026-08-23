@@ -1,6 +1,181 @@
 local keymap_utils = require("mcphub.native.neovim.utils.keymap")
 local text = require("mcphub.utils.text")
 
+-- Horizontal scrolling of virtual lines (`virt_lines_overflow`) exists since Neovim 0.11
+local HAS_VIRT_LINES_OVERFLOW = vim.fn.has("nvim-0.11") == 1
+
+--- Display width of `str` when rendered starting at screen column `start_col`.
+--- Hard tabs are the only column dependent case, and virtual lines do honour 'tabstop',
+--- so tab stops are computed here rather than taken from the active buffer. Widths come
+--- from |nvim_strwidth()| instead of |strdisplaywidth()|, which resolves options against
+--- whichever window happens to be current and therefore is not stable here.
+---@param str string Text to measure
+---@param tabstop integer Value of 'tabstop' of the edited buffer
+---@param start_col integer? Screen column the text starts at (default 0)
+---@return integer width Display cells consumed by `str`
+local function display_width(str, tabstop, start_col)
+    if not str:find("\t", 1, true) then
+        return vim.api.nvim_strwidth(str)
+    end
+
+    local start = start_col or 0
+    local col = start
+    local pos = 1
+    while true do
+        local tab = str:find("\t", pos, true)
+        if not tab then
+            col = col + vim.api.nvim_strwidth(str:sub(pos))
+            break
+        end
+        col = col + vim.api.nvim_strwidth(str:sub(pos, tab - 1))
+        col = col + tabstop - (col % tabstop)
+        pos = tab + 1
+    end
+    return col - start
+end
+
+--- Parse 'breakindentopt' into the sub-options that affect continuation rows.
+--- `list:{n}` is not supported, as it depends on 'formatlistpat' matching.
+---@param value string Value of 'breakindentopt'
+---@return table briopt Parsed sub-options: `min`, `shift`, `sbr` and optional `column`
+local function parse_breakindentopt(value)
+    local briopt = { min = 20, shift = 0, sbr = false }
+    for _, item in ipairs(vim.split(value or "", ",", { trimempty = true })) do
+        local key, number = item:match("^(%a+):(%-?%d+)$")
+        if key == "min" or key == "shift" or key == "column" then
+            briopt[key] = tonumber(number)
+        elseif item == "sbr" then
+            briopt.sbr = true
+        end
+    end
+    return briopt
+end
+
+---@class VirtLineGeometry
+---@field width integer Display cells available to virtual lines
+---@field wrap boolean Whether the window has 'wrap' enabled
+---@field linebreak boolean Whether the window has 'linebreak' enabled
+---@field breakat string Value of 'breakat', the characters 'linebreak' may break at
+---@field showbreak string Value of 'showbreak', prefixed to continuation rows
+---@field breakindent boolean Whether the window has 'breakindent' enabled
+---@field briopt table Parsed 'breakindentopt'
+---@field tabstop integer Value of 'tabstop' of the edited buffer
+
+--- Whether `char` may be broken at, mirroring Neovim's restriction of 'breakat' to ASCII
+---@param char string Single character
+---@param breakat string Value of 'breakat'
+---@return boolean
+local function is_breakat(char, breakat)
+    return #char == 1 and breakat:find(char, 1, true) ~= nil
+end
+
+--- Decoration real wrapped text would get at the start of every continuation row,
+--- built from 'showbreak', 'breakindent' and 'breakindentopt'.
+---@param line string Logical line being wrapped, whose indent 'breakindent' repeats
+---@param geometry VirtLineGeometry Geometry of the window showing the edited buffer
+---@return string prefix Possibly empty prefix for continuation rows
+local function continuation_prefix(line, geometry)
+    local showbreak = geometry.showbreak or ""
+    if not geometry.breakindent then
+        return showbreak
+    end
+
+    local briopt = geometry.briopt
+    local indent = display_width(line:match("^[ \t]*") or "", geometry.tabstop, 0)
+    if briopt.column then
+        indent = briopt.column
+    end
+    indent = indent + briopt.shift
+
+    -- 'breakindentopt' `min` keeps this much room for the text itself, no matter how
+    -- deeply the line is indented.
+    local room = geometry.width - display_width(showbreak, geometry.tabstop, 0) - briopt.min
+    indent = math.max(math.min(indent, math.max(room, 0)), 0)
+
+    local pad = string.rep(" ", indent)
+    -- 'breakindentopt' `sbr` puts 'showbreak' before the extra indent instead of after it
+    return briopt.sbr and showbreak .. pad or pad .. showbreak
+end
+
+--- Soft-wrap `line` into the rows a window would break it into.
+--- Neovim never wraps virtual lines itself (see |nvim_buf_set_extmark()|: 'wrap' and
+--- 'linebreak' do not take effect for `virt_lines`), so the removed side of a hunk has
+--- to be broken into one row per screen line by hand to keep it inside the window.
+--- 'linebreak', 'showbreak', 'breakindent' and 'breakindentopt' are reproduced here so
+--- that removed lines break and align like the surrounding real text.
+---@param line string Line to wrap
+---@param geometry VirtLineGeometry Geometry of the window showing the edited buffer
+---@return string[] rows One entry per screen row, continuation rows already decorated
+local function soft_wrap(line, geometry)
+    local width, tabstop = geometry.width, geometry.tabstop
+    if width <= 0 or line == "" then
+        return { line }
+    end
+
+    local prefix = continuation_prefix(line, geometry)
+    local prefix_width = display_width(prefix, tabstop, 0)
+    -- Never let the decoration eat a whole row, which would stall the loop below
+    if prefix_width >= width then
+        prefix, prefix_width = "", 0
+    end
+
+    -- Fast path: undecorated plain ASCII without tabs, where one byte is one display cell
+    if prefix == "" and not geometry.linebreak and not line:find("[\t\128-\255]") then
+        if #line <= width then
+            return { line }
+        end
+        local rows = {}
+        for i = 1, #line, width do
+            table.insert(rows, line:sub(i, i + width - 1))
+        end
+        return rows
+    end
+
+    -- Tab stops restart on every virtual line, so widths are measured from the row start
+    -- (behind the continuation prefix) rather than from the start of the logical line.
+    local chars = vim.fn.split(line, "\\zs")
+    local rows = {}
+    local index = 1
+    while index <= #chars do
+        local col = #rows == 0 and 0 or prefix_width
+        local stop, last_break = index - 1, nil
+        for i = index, #chars do
+            local char_width = display_width(chars[i], tabstop, col)
+            if col + char_width > width and stop >= index then
+                break
+            end
+            col = col + char_width
+            stop = i
+            if geometry.linebreak and is_breakat(chars[i], geometry.breakat) then
+                last_break = i
+            end
+        end
+
+        -- 'linebreak': prefer the last word boundary in the row over a hard cut mid-word
+        if geometry.linebreak and last_break and last_break < stop and stop < #chars then
+            stop = last_break
+        end
+
+        local chunk = table.concat(chars, "", index, stop)
+        table.insert(rows, #rows == 0 and chunk or prefix .. chunk)
+        index = stop + 1
+    end
+    return rows
+end
+
+--- Pad `str` with spaces so that it fills `width` display cells.
+---@param str string Text to pad
+---@param width integer Target width in display cells
+---@param tabstop integer Value of 'tabstop' of the edited buffer
+---@return string padded
+local function pad_to_width(str, width, tabstop)
+    local str_width = display_width(str, tabstop, 0)
+    if str_width < width then
+        return str .. string.rep(" ", width - str_width)
+    end
+    return str
+end
+
 ---@class EditUI
 ---@field config UIConfig Configuration options
 ---@field state UIState Current UI state
@@ -24,6 +199,7 @@ EditUI.__index = EditUI
 ---@field completed_hunks table<string, string> Map of hunk_id to completion status
 ---@field current_hunk_index integer Currently active hunk (1-based)
 ---@field original_keymaps table<string, table|nil> Stored original keymaps before session
+---@field virt_line_geometry VirtLineGeometry? Geometry the removed virtual lines were last built for
 
 -- Default UI configuration
 local DEFAULT_CONFIG = {
@@ -245,45 +421,11 @@ function EditUI:_highlight_hunk_block(hunk_block)
 
     -- Handle old content as virtual lines (changes and deletions)
     if hunk_block.type == "change" or hunk_block.type == "deletion" then
-        local virt_lines = {}
-        local function pad_line(line)
-            local max_cols = vim.o.columns
-            local line_length = #line
-            if line_length < max_cols then
-                return line .. string.rep(" ", max_cols - line_length)
-            end
-            return line
-        end
-
-        -- Add deletion indicator for pure deletions
-        if hunk_block.type == "deletion" then
-            table.insert(virt_lines, {
-                {
-                    pad_line(
-                        string.format(
-                            "[DELETED %d line%s]",
-                            #hunk_block.old_lines,
-                            #hunk_block.old_lines > 1 and "s" or ""
-                        )
-                    ),
-                    text.highlights.diff_delete,
-                },
-            })
-        end
-
-        -- Add old content lines
-        for _, line in ipairs(hunk_block.old_lines) do
-            table.insert(virt_lines, { { pad_line(line), text.highlights.diff_delete } })
-        end
-
         -- Calculate virtual line placement with boundary handling
         local virt_line_row, virt_lines_above = self:_calculate_virtual_line_placement(hunk_block)
+        hunk_block.virt_lines_above = virt_lines_above
 
-        local extmark_opts = {
-            virt_lines = virt_lines,
-            virt_lines_above = virt_lines_above,
-            priority = self.highlights.priority,
-        }
+        local extmark_opts = self:_deletion_extmark_opts(hunk_block)
         -- For pure deletions, store the extmark_id for navigation
         if hunk_block.type == "deletion" then
             hunk_block.extmark_id = vim.api.nvim_buf_set_extmark(
@@ -303,6 +445,137 @@ function EditUI:_highlight_hunk_block(hunk_block)
                 0,
                 extmark_opts
             )
+        end
+    end
+end
+
+--- Geometry of the window showing the edited buffer, used to wrap removed content
+---@return VirtLineGeometry geometry Falls back to a non-wrapping default without a window
+function EditUI:_get_virt_line_geometry()
+    local tabstop = vim.bo[self.state.bufnr].tabstop
+    local winid = self:_get_window_for_buffer()
+    if not winid or not vim.api.nvim_win_is_valid(winid) then
+        return {
+            width = vim.o.columns,
+            wrap = false,
+            linebreak = false,
+            breakat = vim.o.breakat,
+            showbreak = "",
+            breakindent = false,
+            briopt = parse_breakindentopt(""),
+            tabstop = tabstop,
+        }
+    end
+
+    -- Virtual lines start at the text area, so the gutter (number, sign and fold
+    -- columns, reported as `textoff`) is not available to them.
+    local info = vim.fn.getwininfo(winid)[1]
+    local width = info and (info.width - info.textoff) or vim.api.nvim_win_get_width(winid)
+    return {
+        width = math.max(width, 1),
+        wrap = vim.wo[winid].wrap,
+        linebreak = vim.wo[winid].linebreak,
+        breakat = vim.o.breakat,
+        -- 'showbreak' is global-local, so resolve it rather than reading the local value
+        showbreak = vim.api.nvim_get_option_value("showbreak", { win = winid }),
+        breakindent = vim.wo[winid].breakindent,
+        briopt = parse_breakindentopt(vim.wo[winid].breakindentopt),
+        tabstop = tabstop,
+    }
+end
+
+--- Build the virtual lines showing a hunk's removed content, honouring 'wrap'
+---@param hunk_block DiffHunk Hunk whose `old_lines` are rendered as removed content
+---@return table[] virt_lines Virtual lines in |nvim_buf_set_extmark()| format
+function EditUI:_build_deletion_virt_lines(hunk_block)
+    local geometry = self:_get_virt_line_geometry()
+    self.state.virt_line_geometry = geometry
+
+    local virt_lines = {}
+    local function add(line)
+        for _, row in ipairs(geometry.wrap and soft_wrap(line, geometry) or { line }) do
+            -- With 'wrap' fill exactly the text area. With 'nowrap' the row scrolls
+            -- horizontally instead, so extend the highlight one window past its own
+            -- content to keep the band solid while scrolling through it.
+            local pad_width = geometry.width
+            if not geometry.wrap then
+                pad_width = math.max(vim.o.columns, display_width(row, geometry.tabstop, 0) + geometry.width)
+            end
+            local padded = pad_to_width(row, pad_width, geometry.tabstop)
+            table.insert(virt_lines, { { padded, text.highlights.diff_delete } })
+        end
+    end
+
+    -- Add deletion indicator for pure deletions
+    if hunk_block.type == "deletion" then
+        add(string.format("[DELETED %d line%s]", #hunk_block.old_lines, #hunk_block.old_lines > 1 and "s" or ""))
+    end
+
+    -- Add old content lines
+    for _, line in ipairs(hunk_block.old_lines) do
+        add(line)
+    end
+
+    return virt_lines
+end
+
+--- Extmark options rendering a hunk's removed content as virtual lines
+---@param hunk_block DiffHunk Hunk whose `old_lines` are rendered as removed content
+---@return table opts Options for |nvim_buf_set_extmark()|
+function EditUI:_deletion_extmark_opts(hunk_block)
+    local extmark_opts = {
+        virt_lines = self:_build_deletion_virt_lines(hunk_block),
+        virt_lines_above = hunk_block.virt_lines_above,
+        priority = self.highlights.priority,
+    }
+
+    -- Under 'nowrap' let the removed lines scroll horizontally with the buffer text
+    -- instead of staying pinned to the left. Under 'wrap' they are wrapped by hand and
+    -- always fit, so the default truncation never kicks in.
+    if HAS_VIRT_LINES_OVERFLOW then
+        extmark_opts.virt_lines_overflow = self.state.virt_line_geometry.wrap and "trunc" or "scroll"
+    end
+
+    return extmark_opts
+end
+
+--- Re-wrap the removed content of all pending hunks after the window geometry or 'wrap'
+--- changed. Extmark rows are read back from the buffer, so hunks keep their position
+--- even when earlier hunks have already been accepted or rejected.
+function EditUI:_refresh_deletion_virt_lines()
+    if not self.state or self.state.has_completed or not self.state.hunk_blocks then
+        return
+    end
+    if not vim.api.nvim_buf_is_valid(self.state.bufnr) then
+        return
+    end
+
+    -- Window events fire in bulk, so skip the rebuild while the geometry is unchanged
+    local geometry = self:_get_virt_line_geometry()
+    if vim.deep_equal(self.state.virt_line_geometry, geometry) then
+        return
+    end
+
+    for _, hunk_block in ipairs(self.state.hunk_blocks) do
+        local extmark_id = hunk_block.del_extmark_id
+        if extmark_id and not (self.state.completed_hunks or {})[hunk_block.hunk_id] then
+            local mark = vim.api.nvim_buf_get_extmark_by_id(
+                self.state.bufnr,
+                self.highlights.namespace_diff,
+                extmark_id,
+                {}
+            )
+            if mark and mark[1] then
+                local extmark_opts = self:_deletion_extmark_opts(hunk_block)
+                extmark_opts.id = extmark_id
+                vim.api.nvim_buf_set_extmark(
+                    self.state.bufnr,
+                    self.highlights.namespace_diff,
+                    mark[1],
+                    0,
+                    extmark_opts
+                )
+            end
         end
     end
 end
@@ -382,6 +655,37 @@ function EditUI:_setup_autocmds()
         group = self.state.augroup,
         callback = vim.schedule_wrap(function()
             self:_update_hints()
+        end),
+    })
+
+    -- Re-wrap removed content when the window geometry changes: Neovim does not wrap
+    -- virtual lines, so their chunk width has to be recomputed by hand.
+    vim.api.nvim_create_autocmd({ "VimResized", "WinResized", "WinEnter", "WinClosed" }, {
+        group = self.state.augroup,
+        callback = vim.schedule_wrap(function()
+            self:_refresh_deletion_virt_lines()
+        end),
+    })
+
+    -- Same for options that change 'wrap' itself or the width of the text area
+    vim.api.nvim_create_autocmd({ "OptionSet" }, {
+        pattern = {
+            "wrap",
+            "linebreak",
+            "breakat",
+            "breakindent",
+            "breakindentopt",
+            "showbreak",
+            "number",
+            "relativenumber",
+            "numberwidth",
+            "signcolumn",
+            "foldcolumn",
+            "tabstop",
+        },
+        group = self.state.augroup,
+        callback = vim.schedule_wrap(function()
+            self:_refresh_deletion_virt_lines()
         end),
     })
 
@@ -763,7 +1067,7 @@ function EditUI:_remove_hunk_highlights(hunk_block)
     end
     if hunk_block.del_extmark_id then
         pcall(vim.api.nvim_buf_del_extmark, self.state.bufnr, self.highlights.namespace_diff, hunk_block.del_extmark_id)
-        hunk_block.extmark_id = nil
+        hunk_block.del_extmark_id = nil
     end
     -- Clear current hint for the removed block's line
     vim.api.nvim_buf_clear_namespace(self.state.bufnr, self.highlights.namespace_hints, 0, -1)
