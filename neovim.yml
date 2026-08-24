@@ -1,0 +1,26 @@
+---
+# Minimal selene standard library for Neovim Lua.
+#
+# Neovim runs LuaJIT, so the Lua 5.1 base is the correct starting point.
+# `vim` is declared permissive (`any: true`) rather than enumerated: the goal
+# here is to stop selene reporting the whole Neovim API as undefined globals,
+# not to type-check it. Repos that want real API validation should vendor a
+# fully enumerated std instead.
+#
+# Created 2026-08-24 so that repos shipping `std = "neovim"` in selene.toml
+# (e.g. mcphub.nvim) resolve without vendoring their own copy.
+base: lua51
+globals:
+  vim:
+    any: true
+  # Test-runner globals used by mini.test / busted-style specs.
+  MiniTest:
+    any: true
+  describe:
+    any: true
+  it:
+    any: true
+  before_each:
+    any: true
+  after_each:
+    any: true
