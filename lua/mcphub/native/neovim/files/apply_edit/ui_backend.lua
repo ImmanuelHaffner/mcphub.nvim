@@ -431,15 +431,16 @@ local DEFAULT_LSP_WAIT_MS = 1000
 --- ## How to override
 ---
 --- Mutate this table after requiring the module — typically from your
---- mcphub `add_tool` registration site:
+--- Neovim config, once mcphub's `setup()` has run:
 ---
 ---     local backend = require("mcphub.native.neovim.files.apply_edit.ui_backend")
 ---     backend.LSP_WAIT_MS.metals = 8000
 ---
 --- Unknown clients fall back to `DEFAULT_LSP_WAIT_MS`. The table is
---- module-level (not behind a `setup()` opts arg) by design: rolling
---- out a `setup` API for one knob would be premature; once we have
---- more configuration to expose, this folds in cleanly.
+--- module-level rather than a `State.config.builtin_tools.apply_edit`
+--- entry by design: standing up a config surface for one knob would be
+--- premature; once there is more to expose, it folds cleanly into the
+--- house pattern `edit_file` already uses.
 ---
 --- @type table<string, integer>
 M.LSP_WAIT_MS = {

@@ -47,8 +47,7 @@
 ---
 --- `M.safe_encode` bundles "scrub then encode" so both handlers get the
 --- fix through one tested seam. Keeping this in the pure engine (no
---- mcphub, no MCP) makes it unit-testable in isolation under
---- `tests/edit/`.
+--- mcphub, no MCP) makes it unit-testable in isolation.
 ---
 --- ## Why U+FFFD rather than escaping or erroring
 ---
