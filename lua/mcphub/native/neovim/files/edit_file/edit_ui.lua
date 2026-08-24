@@ -559,22 +559,12 @@ function EditUI:_refresh_deletion_virt_lines()
     for _, hunk_block in ipairs(self.state.hunk_blocks) do
         local extmark_id = hunk_block.del_extmark_id
         if extmark_id and not (self.state.completed_hunks or {})[hunk_block.hunk_id] then
-            local mark = vim.api.nvim_buf_get_extmark_by_id(
-                self.state.bufnr,
-                self.highlights.namespace_diff,
-                extmark_id,
-                {}
-            )
+            local mark =
+                vim.api.nvim_buf_get_extmark_by_id(self.state.bufnr, self.highlights.namespace_diff, extmark_id, {})
             if mark and mark[1] then
                 local extmark_opts = self:_deletion_extmark_opts(hunk_block)
                 extmark_opts.id = extmark_id
-                vim.api.nvim_buf_set_extmark(
-                    self.state.bufnr,
-                    self.highlights.namespace_diff,
-                    mark[1],
-                    0,
-                    extmark_opts
-                )
+                vim.api.nvim_buf_set_extmark(self.state.bufnr, self.highlights.namespace_diff, mark[1], 0, extmark_opts)
             end
         end
     end
