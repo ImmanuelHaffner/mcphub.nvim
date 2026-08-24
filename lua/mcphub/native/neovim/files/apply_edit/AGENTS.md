@@ -376,14 +376,19 @@ calls `add_tool` itself. Calls `engine.apply` for apply and
 
 Specs live under `tests/native/neovim/files/apply_edit/`, mirroring the
 source layout, and are named `test_*.lua` because MiniTest's default
-collector globs `tests/**/test_*.lua`.
+collector globs `tests/**/test_*.lua` — a file named anything else is
+silently never collected, so the suite would pass while testing nothing.
 
-> **Port status.** The specs are not in this repo yet — they are being
-> ported from the bespoke runner they were written against onto
-> MiniTest. The table below describes the layout they land in.
+The specs are written in busted style (`describe` / `it` / `assert`).
+MiniTest supplies the *structure* itself: `MiniTest.collect()` defaults to
+`emulate_busted = true`, which installs `describe`, `it`, `before_each` and
+friends for the duration of collection and lets a spec file return nothing.
+It does not supply busted's *assertions*, which is what `busted_assert.lua`
+is for — see its header for why that table has to be callable.
 
 | File                               | What it covers                                                |
 | ---------------------------------- | ------------------------------------------------------------- |
+| `busted_assert.lua`                | Busted's `assert` vocabulary — `is.equal` / `are.same` / the `is_*` predicates — plus a `__call` metamethod delegating to Lua's builtin `assert`. Shadowed per spec file, never installed globally. |
 | `helpers.lua`                      | `schema.validate` / `planner.plan` wrappers with `bypass_fingerprint = true`. |
 | `drivers.lua`                      | Synthetic `drive_file` implementations: `accept_all` (bottom-up apply), `accept_all_ascending` (`EditUI`-style ascending+offset apply), `reject_all`, `make_selective`, `cancel_at`. |
 | `test_e2e.lua`                     | End-to-end through `engine.apply` with `accept_all`.          |
@@ -393,9 +398,10 @@ collector globs `tests/**/test_*.lua`.
 | `test_ui_backend.lua`              | Unit tests for the bridge helpers. May import mcphub.          |
 | `test_widen_conflict.lua`          | Regression test for the post-widen collision class.           |
 
-Engine specs must not import mcphub; the two bridge specs may. Nothing
-enforces that beyond the grep in *Architecture and module boundaries*,
-so keep it in mind when adding a spec.
+Engine specs must not reach outside `apply_edit/*` — no `EditUI`, no
+`mcphub.state`; the two bridge specs may. Nothing enforces that beyond the
+grep in *Architecture and module boundaries*, so keep it in mind when
+adding a spec.
 
 The synthetic drivers test the **applier's reaction** to outcome shapes,
 not `EditUI`'s *production* of those outcomes. `EditUI`'s contract
