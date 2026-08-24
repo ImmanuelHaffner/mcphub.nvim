@@ -614,35 +614,43 @@ function EditUI:_setup_keybindings()
     -- Store original keymaps before setting temporary ones
     self.state.original_keymaps = keymap_utils.store_original_keymaps("n", KEYBINDINGS, bufnr)
 
+    -- All review keymaps are `nowait` so a complete match fires immediately
+    -- instead of waiting `timeoutlen` for a longer sequence. This is load-bearing
+    -- for the default `gr` (reject all): since Neovim 0.11 the stock LSP mappings
+    -- `grn`, `gra`, `gri`, `grr` and `grt` are global, so `gr` is a *prefix* of
+    -- five other maps. Without `nowait`, pressing `gr` during a review does
+    -- nothing for a full second (default `timeoutlen` = 1000), and a following
+    -- keystroke can resolve to an LSP action instead of rejecting the hunk.
+
     -- Accept current change
     vim.keymap.set({ "n" }, KEYBINDINGS.accept, function()
         self:_accept_current_hunk()
-    end, { buffer = bufnr, desc = "Accept current hunk" })
+    end, { buffer = bufnr, nowait = true, desc = "Accept current hunk" })
 
     -- Reject current change
     vim.keymap.set({ "n" }, KEYBINDINGS.reject, function()
         self:_reject_current_hunk()
-    end, { buffer = bufnr, desc = "Reject current hunk" })
+    end, { buffer = bufnr, nowait = true, desc = "Reject current hunk" })
 
     -- Navigate to next hunk
     vim.keymap.set({ "n" }, KEYBINDINGS.next, function()
         self:_navigate_next_hunk()
-    end, { buffer = bufnr, desc = "Go to next hunk" })
+    end, { buffer = bufnr, nowait = true, desc = "Go to next hunk" })
 
     -- Navigate to previous hunk
     vim.keymap.set({ "n" }, KEYBINDINGS.prev, function()
         self:_navigate_prev_hunk()
-    end, { buffer = bufnr, desc = "Go to previous hunk" })
+    end, { buffer = bufnr, nowait = true, desc = "Go to previous hunk" })
 
     -- Accept all remaining changes
     vim.keymap.set({ "n" }, KEYBINDINGS.accept_all, function()
         self:_accept_all_remaining_hunks()
-    end, { buffer = bufnr, desc = "Accept all remaining hunks" })
+    end, { buffer = bufnr, nowait = true, desc = "Accept all remaining hunks" })
 
     -- Reject all remaining changes
     vim.keymap.set({ "n" }, KEYBINDINGS.reject_all, function()
         self:_reject_all_remaining_hunks()
-    end, { buffer = bufnr, desc = "Reject all remaining hunks" })
+    end, { buffer = bufnr, nowait = true, desc = "Reject all remaining hunks" })
 end
 
 -- Set up autocommands for buffer events
