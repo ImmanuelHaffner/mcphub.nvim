@@ -274,12 +274,54 @@ end
 -- Anchor validation
 --------------------------------------------------------------------------------
 
-local BASE_ANCHOR_KINDS = {
-    line_range = true,
-    unique_text = true,
-    treesitter = true,
-    lsp_symbol = true,
+--- Every base anchor kind the schema accepts, in the order error messages
+--- present them: the kinds an `anchors/` resolver actually handles first, then
+--- present them: the kinds an `anchors/` resolver actually handles first, then
+--- the ones declared only for forward compatibility. `blurb` is the one-phrase
+--- gloss used where a message has to say what a kind matches on; every kind
+--- carries one, so promoting a kind is a one-word edit here and nothing else.
+---
+--- This list is the single source of truth for the three questions the validator
+--- asks — "is this a base anchor kind at all?" (`unknown_kind`), "is there a
+--- resolver for it yet?" (`unsupported_anchor_kind`), and "what should I tell the
+--- LLM to use instead?" — plus every prose enumeration below. Implementing a new
+--- kind is therefore flipping one `implemented` flag, not hunting six strings.
+--- @type { name: string, implemented: boolean, blurb: string }[]
+local BASE_ANCHOR_KIND_LIST = {
+    { name = "line_range", implemented = true, blurb = "by line numbers" },
+    { name = "unique_text", implemented = true, blurb = "by substring" },
+    { name = "treesitter", implemented = false, blurb = "by treesitter query" },
+    { name = "lsp_symbol", implemented = false, blurb = "by LSP document symbol" },
 }
+
+--- Membership *and* implementation lookup, keyed by kind name. Truthy for every
+--- accepted kind, so `if not BASE_ANCHOR_KINDS[by]` still reads as before.
+--- @type table<string, { name: string, implemented: boolean, blurb: string? }>
+local BASE_ANCHOR_KINDS = {}
+
+local all_names = {}
+local implemented_names = {}
+local implemented_glosses = {}
+local implemented_quoted_glosses = {}
+for _, kind in ipairs(BASE_ANCHOR_KIND_LIST) do
+    -- Without this, promoting a blurb-less kind would fail at load with LuaJIT's
+    -- opaque `string.format` error instead of naming what is missing.
+    assert(type(kind.blurb) == "string", "base anchor kind needs a `blurb`: " .. tostring(kind.name))
+    BASE_ANCHOR_KINDS[kind.name] = kind
+    table.insert(all_names, kind.name)
+    if kind.implemented then
+        table.insert(implemented_names, kind.name)
+        table.insert(implemented_glosses, string.format("%s (%s)", kind.name, kind.blurb))
+        table.insert(implemented_quoted_glosses, string.format("`%s` (%s)", kind.name, kind.blurb))
+    end
+end
+
+--- Message fragments derived from `BASE_ANCHOR_KIND_LIST`, built once at load.
+local ALL_KINDS = table.concat(all_names, ", ")
+local IMPLEMENTED_KINDS = table.concat(implemented_names, ", ")
+local IMPLEMENTED_KINDS_OR = table.concat(implemented_names, " or ")
+local IMPLEMENTED_GLOSSED = table.concat(implemented_glosses, ", ")
+local IMPLEMENTED_GLOSSED_OR = table.concat(implemented_quoted_glosses, " or ")
 
 local MODIFIER_KINDS = {
     before = true,
@@ -287,7 +329,9 @@ local MODIFIER_KINDS = {
     between = true,
 }
 
-local ANCHOR_KIND_OVERVIEW = "base anchor kinds: line_range (by line numbers), unique_text (by substring); "
+local ANCHOR_KIND_OVERVIEW = "base anchor kinds: "
+    .. IMPLEMENTED_GLOSSED
+    .. "; "
     .. "positional modifiers: before / after (wrap a base anchor), between (insert at the seam between two adjacent texts)"
 
 --- Validate a base anchor (resolves to a range). Returns parsed copy on success.
@@ -304,7 +348,9 @@ local function validate_base_anchor(anchor, path, errors, op_index)
     if
         not expect_nonempty_string(anchor.by, path .. ".by", errors, {
             op_index = op_index,
-            hint = "set `by` to one of: line_range, unique_text, or before / after / between (positional modifiers)",
+            hint = "set `by` to one of: "
+                .. IMPLEMENTED_KINDS
+                .. ", or before / after / between (positional modifiers)",
         })
     then
         return nil
@@ -315,7 +361,7 @@ local function validate_base_anchor(anchor, path, errors, op_index)
         table.insert(
             errors,
             err(path .. ".by", M.ERROR_REASONS.unknown_kind, "unknown base anchor kind", {
-                expected = "one of: line_range, unique_text, treesitter, lsp_symbol",
+                expected = "one of: " .. ALL_KINDS,
                 got = by,
                 op_index = op_index,
                 hint = ANCHOR_KIND_OVERVIEW,
@@ -423,7 +469,9 @@ local function validate_base_anchor(anchor, path, errors, op_index)
             end
         end
         return parsed
-    elseif by == "treesitter" or by == "lsp_symbol" then
+    elseif not BASE_ANCHOR_KINDS[by].implemented then
+        -- Declared for forward compatibility, but no resolver handles it yet.
+        -- Unknown kinds were already rejected above, so the entry exists here.
         table.insert(
             errors,
             err(
@@ -431,10 +479,10 @@ local function validate_base_anchor(anchor, path, errors, op_index)
                 M.ERROR_REASONS.unsupported_anchor_kind,
                 string.format("anchor kind %q is accepted by the schema but not yet implemented", by),
                 {
-                    expected = "line_range or unique_text (currently implemented)",
+                    expected = IMPLEMENTED_KINDS_OR .. " (currently implemented)",
                     got = by,
                     op_index = op_index,
-                    hint = "use `line_range` (by line numbers) or `unique_text` (by substring) for now",
+                    hint = "use " .. IMPLEMENTED_GLOSSED_OR .. " for now",
                 }
             )
         )
@@ -458,7 +506,9 @@ local function validate_anchor(anchor, path, errors, op_index, require_position)
         not expect_nonempty_string(anchor.by, path .. ".by", errors, {
             op_index = op_index,
             hint = require_position and "for `insert`, set `by` to one of: before, after, between"
-                or "set `by` to one of the base kinds (line_range, unique_text) or modifiers (before, after, between)",
+                or "set `by` to one of the base kinds ("
+                    .. IMPLEMENTED_KINDS
+                    .. ") or modifiers (before, after, between)",
         })
     then
         return nil
