@@ -9,6 +9,7 @@ local Text = require("mcphub.utils.text")
 local View = require("mcphub.ui.views.base")
 local config_manager = require("mcphub.utils.config_manager")
 local constants = require("mcphub.utils.constants")
+local deprecation = require("mcphub.utils.deprecation")
 local native = require("mcphub.native")
 local renderer = require("mcphub.utils.renderer")
 local ui_utils = require("mcphub.utils.ui")
@@ -816,6 +817,15 @@ function MainView:handle_server_toggle()
                 if item_id == capability_id then
                     table.remove(disabled_list, i)
                     break
+                end
+            end
+            -- `is_disabled` was the state *before* the toggle, so this branch is
+            -- the enabling one. Warn here rather than at startup: this is the
+            -- moment the user is deciding, and can act on the advice at once.
+            if type == "tool" then
+                local notice = deprecation.for_tool(server_name, capability_id)
+                if notice then
+                    deprecation.notify_enabled(notice)
                 end
             end
         else

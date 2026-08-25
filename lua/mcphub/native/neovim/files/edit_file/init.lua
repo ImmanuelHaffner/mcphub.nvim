@@ -1,9 +1,18 @@
 local State = require("mcphub.state")
+local deprecation = require("mcphub.utils.deprecation")
+
+--- Soft-deprecated in favour of `apply_edit`, which supersedes it. Still fully
+--- functional and still registered; disable it from the MCPHub UI if unwanted.
+--- The notice itself lives in `mcphub.utils.deprecation`, which the UI consults
+--- too, so the wording cannot drift between the two.
+local DEPRECATED = deprecation.EDIT_FILE
+
 ---New modular editor tool using EditSession
 ---@type MCPTool
 local edit_file_tool = {
     name = "edit_file",
-    description = [[Replace multiple sections in a file using SEARCH/REPLACE blocks that define exact changes to specific parts of the file. This tool starts an interactive edit session in Neovim. The user might accept some changes, reject some or add new text during the edit session. Once the edit session completes the result will include useful information like diff and feedback which you MUST take into account for SUBSEQUENT conversation: 
+    description = deprecation.banner(DEPRECATED)
+        .. [[Replace multiple sections in a file using SEARCH/REPLACE blocks that define exact changes to specific parts of the file. This tool starts an interactive edit session in Neovim. The user might accept some changes, reject some or add new text during the edit session. Once the edit session completes the result will include useful information like diff and feedback which you MUST take into account for SUBSEQUENT conversation: 
 1. A diff comparing the file before and after the edit session. The diff might be a result of a combination of:
    - Changes from successfully applied SEARCH/REPLACE blocks
    - Changes made by the USER during the edit session
@@ -149,6 +158,8 @@ IMPORTANT: Batch multiple related changes for a file into a single call to minim
         required = { "path", "diff" },
     },
     handler = function(req, res)
+        -- Reports that the tool was invoked, so it belongs ahead of validation.
+        deprecation.notify_once(DEPRECATED)
         local params = req.params
         if not params.path or vim.trim(params.path) == "" then
             return res:error("Missing required parameter: path")

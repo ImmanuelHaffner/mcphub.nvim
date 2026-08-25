@@ -1,11 +1,18 @@
 local Path = require("plenary.path")
+local deprecation = require("mcphub.utils.deprecation")
+
+--- Soft-deprecated in favour of `read_with_fingerprint`. Still fully functional
+--- and still registered; disable it from the MCPHub UI if unwanted. The notice
+--- itself lives in `mcphub.utils.deprecation`, which the UI consults too, so the
+--- wording cannot drift between the two.
+local READ_FILE_DEPRECATED = deprecation.READ_FILE
 
 ---Basic file operations tools
 ---@type MCPTool[]
 local file_tools = {
     {
         name = "read_file",
-        description = "Read contents of a file",
+        description = deprecation.banner(READ_FILE_DEPRECATED) .. "Read contents of a file",
         inputSchema = {
             type = "object",
             properties = {
@@ -28,6 +35,7 @@ local file_tools = {
         },
         handler = function(req, res)
             local params = req.params
+            deprecation.notify_once(READ_FILE_DEPRECATED)
             local p = Path:new(params.path)
 
             if not p:exists() then
