@@ -445,7 +445,7 @@ describe("apply_plan with synthetic drivers", function()
             -- applier should forward verbatim — it never introspects the
             -- shape.
             local path, bufnr, fp = fixture_file({ "x" }, "_diag_fwd.txt")
-            local driver = function(request, file_cb)
+            local driver = function(_request, file_cb)
                 vim.schedule(function()
                     file_cb({
                         status = "completed",
@@ -530,7 +530,7 @@ describe("apply_plan with synthetic drivers", function()
             -- forward each failure into the response's failed[] and continue
             -- with subsequent files.
             local path, bufnr, fp = fixture_file({ "a", "b" }, "_precond.txt")
-            local driver = function(request, file_cb)
+            local driver = function(_request, file_cb)
                 vim.schedule(function()
                     file_cb({
                         status = "precondition_failed",
