@@ -4,7 +4,7 @@
 --- A FileRecord is the input shape every anchor resolver expects:
 ---
 ---   {
----     path      = "/abs/path/lua/foo.lua",  -- absolute, normalised via `:p`
+---     path      = "/abs/path/lua/foo.lua",  -- absolute, buffer-canonical
 ---     content   = "<raw bytes as a single Lua string>",
 ---     offsets   = { 1, 42, 117, ... },  -- 1-based; offsets[i] = first byte of line i
 ---     n_lines   = N,
@@ -50,7 +50,7 @@ local M = {}
 
 --- A canonical file record.
 --- @class mcphub.edit.FileRecord
---- @field path      string                 Absolute path (via `fnamemodify(':p')`).
+--- @field path      string                 Absolute path as Neovim names the buffer (`realpath`-canonical).
 --- @field content   string                 Raw bytes of the file as a single Lua string (EOL-normalised, see module doc).
 --- @field offsets   integer[]              1-based; offsets[i] = first byte of line i. Always has at least { 1 }.
 --- @field n_lines   integer                Number of lines in `content`. Derived from `#offsets`.
@@ -149,8 +149,14 @@ end
 --- planner re-hashes, and `EditUI` (our applier) operates on buffers, so we
 --- standardise on the buffer as the source of truth. See module doc.
 ---
---- Path is normalised via `:p` so we match the buffer name Neovim itself
---- assigns. Fresh buffers are `bufload`ed (which reads from disk through
+--- The `path` argument is expanded with `:p` before the buffer lookup, so a
+--- relative path resolves against the cwd. The record's own `path` is *not*
+--- that string: `from_buffer` takes it from `nvim_buf_get_name`, which Neovim
+--- canonicalises through `realpath`. The two forms differ whenever symlinks
+--- are involved — on macOS `$TMPDIR` sits under the `/var` → `/private/var`
+--- link — so never compare a `:p` path against a record's `path`.
+---
+--- Fresh buffers are `bufload`ed (which reads from disk through
 --- Neovim's normal load pipeline — encoding, BOM, `'fileformat'`). Pre-checks
 --- via `vim.uv.fs_stat` distinguish "file does not exist" from "file is
 --- empty" so we don't pollute the buffer list with bogus names.
