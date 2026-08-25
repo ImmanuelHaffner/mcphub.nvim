@@ -16,6 +16,22 @@ local M = {}
 ---@field show_server_tools_in_chat boolean Whether to show all tools in cmp or not
 ---@field show_result_in_chat boolean Whether to show the result in chat or not
 ---@field format_tool function(tool_name: string, tool: CodeCompanion.Agent.Tool): string
+---@field size_guard MCPHub.Extensions.CodeCompanion.SizeGuardConfig Oversized-result spilling
+
+---@class MCPHub.Extensions.CodeCompanion.SizeGuardConfig
+---Keeps oversized MCP results out of the chat context by writing the payload to a
+---file and replacing the inline text with a summary plus inspection hints.
+---Every budget takes `nil` (use the default), `false` (disable that budget) or a
+---number. A result is spilled when it exceeds ANY enabled budget.
+---@field enabled? boolean Master switch. Default true.
+---@field max_bytes? integer|false Byte budget. Default `mcphub.utils.spill.DEFAULT_MAX_BYTES` (96 KB).
+---@field max_lines? integer|false Line budget. Default `mcphub.utils.spill.DEFAULT_MAX_LINES` (2000).
+---@field max_tokens? integer|false Token budget. Default 20000; needs a counter, see `token_counter`.
+---@field token_counter? fun(s: string): integer Token estimator. Defaults to `codecompanion.utils.tokens`.
+---@field skip? string[] Capabilities never spilled, as `"<server>__<tool>"` or bare `"<tool>"`. ADDITIVE on top of the defaults.
+---@field skip_defaults? boolean Keep the built-in skip list. Default true; `false` replaces it with `skip` alone.
+---@field gc? boolean|{ max_age_hours?: integer, period_minutes?: integer } Spill-file cleanup. `true`/nil = 24h retention swept hourly; `false` = off.
+---@field dir? string Spill directory. Default `stdpath("cache")/mcphub-spill`.
 
 ---@class MCPHub.Extensions.CopilotChatConfig
 ---@field enabled boolean Whether the extension is enabled or not

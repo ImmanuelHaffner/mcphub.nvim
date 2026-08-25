@@ -17,6 +17,12 @@ function M.setup(opts)
         show_result_in_chat = true,
     }, opts or {})
     local ok, cc_config = pcall(require, "codecompanion.config")
+    --- Spill oversized MCP results instead of letting them flood the context.
+    --- Configured before the `codecompanion.config` guard below, since the guard
+    --- runs inside `execute_mcp_tool` and is useful even if this early return
+    --- fires. Its own defaults live in that module, not in the table above.
+    require("mcphub.extensions.codecompanion.size_guard").setup(opts.size_guard)
+
     if not ok then
         return
     end

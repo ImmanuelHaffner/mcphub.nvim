@@ -1,6 +1,7 @@
 local M = {}
 local async = require("plenary.async")
 local shared = require("mcphub.extensions.shared")
+local size_guard = require("mcphub.extensions.codecompanion.size_guard")
 
 --- Core MCP tool execution logic
 ---@param params MCPHub.ToolCallArgs | MCPHub.ResourceAccessArgs
@@ -55,6 +56,9 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
                                 or "No response from accessing the resource " .. parsed_params.uri,
                         })
                     elseif res then
+                        -- Guarded here, not in the output handler, because this is
+                        -- where the capability's real identity is known.
+                        size_guard.apply(res, { server_name = parsed_params.server_name, uri = parsed_params.uri })
                         output_handler({ status = "success", data = res })
                     end
                 end,
@@ -73,6 +77,10 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
                     elseif res.error then
                         output_handler({ status = "error", data = res.error })
                     else
+                        size_guard.apply(
+                            res,
+                            { server_name = parsed_params.server_name, tool_name = parsed_params.tool_name }
+                        )
                         output_handler({ status = "success", data = res })
                     end
                 end,
