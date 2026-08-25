@@ -26,6 +26,7 @@ see [`AGENTS.md`](AGENTS.md).
 - [The response](#the-response)
 - [Errors and recovery](#errors-and-recovery)
 - [`neovim__read_with_fingerprint`](#neovim__read_with_fingerprint)
+- [Configuration](#configuration)
 - [Limitations](#limitations)
 
 ## What this provides
@@ -673,6 +674,46 @@ it through the fingerprint-emitting read path by construction.
 
 Always read with this tool before editing. The fingerprint is what
 makes the edit safe under concurrent modification.
+
+## Configuration
+
+Set under `builtin_tools.apply_edit` in mcphub's `setup()`. The values
+below are the defaults:
+
+```lua
+require("mcphub").setup({
+    builtin_tools = {
+        apply_edit = {
+            -- Hunk-review UI. `apply_edit` reviews with the same UI as
+            -- `edit_file` but reads its own settings, so rebinding one
+            -- does not affect the other.
+            ui = {
+                auto_navigate = true,            -- move to the next hunk after a decision
+                go_to_origin_on_complete = true, -- return to the window you started in
+                keybindings = {
+                    accept = ".",
+                    reject = ",",
+                    next = "n",
+                    prev = "p",
+                    accept_all = "ga",
+                    reject_all = "gr",
+                },
+            },
+            -- Per-client ceilings (ms) on the post-write wait for LSP
+            -- diagnostics. Merged OVER the curated per-client defaults,
+            -- so naming one client keeps the ceilings for the others.
+            lsp_wait_ms = {}, -- e.g. { metals = 8000 }
+            default_lsp_wait_ms = 1000, -- clients with no curated entry
+            diagnostic_context_lines = 10, -- report diagnostics within N lines of an edit
+        },
+    },
+})
+```
+
+Only those three `ui` fields have any effect here. `apply_edit` reports
+diagnostics itself, so `EditUI`'s `send_diagnostics`,
+`wait_for_diagnostics` and `diagnostic_severity` are never read on this
+path.
 
 ## Limitations
 

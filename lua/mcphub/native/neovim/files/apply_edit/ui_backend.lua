@@ -430,17 +430,23 @@ local DEFAULT_LSP_WAIT_MS = 1000
 ---
 --- ## How to override
 ---
---- Mutate this table after requiring the module — typically from your
---- Neovim config, once mcphub's `setup()` has run:
+--- Preferred: `builtin_tools.apply_edit.lsp_wait_ms` in mcphub's
+--- `setup()`. Its entries are merged *over* this table, so overriding
+--- one client keeps the curated ceilings for all the others:
+---
+---     require("mcphub").setup({
+---         builtin_tools = { apply_edit = { lsp_wait_ms = { metals = 8000 } } },
+---     })
+---
+--- Also supported: mutating this table after requiring the module. That
+--- is the only route for a caller driving `drive_file` without a config
+--- table (the specs, or any non-mcphub embedder):
 ---
 ---     local backend = require("mcphub.native.neovim.files.apply_edit.ui_backend")
 ---     backend.LSP_WAIT_MS.metals = 8000
 ---
---- Unknown clients fall back to `DEFAULT_LSP_WAIT_MS`. The table is
---- module-level rather than a `State.config.builtin_tools.apply_edit`
---- entry by design: standing up a config surface for one knob would be
---- premature; once there is more to expose, it folds cleanly into the
---- house pattern `edit_file` already uses.
+--- Unknown clients fall back to `DEFAULT_LSP_WAIT_MS`, itself overridable
+--- as `builtin_tools.apply_edit.default_lsp_wait_ms`.
 ---
 --- @type table<string, integer>
 M.LSP_WAIT_MS = {
@@ -655,12 +661,51 @@ local function aggregate_per_block(completed_hunks, block_ids)
     return per_block
 end
 
+--- User-facing configuration for `apply_edit`, declared in `mcphub/config.lua`
+--- under `builtin_tools.apply_edit` and handed to `drive_file` by the tool.
+---
+--- It arrives through the *driver* rather than through `engine.apply`, which is
+--- deliberately opts-free — see the "LLM-facing seal" note in `engine.lua`.
+--- Every field is optional, and every absent field falls back to this module's
+--- own default, which is what keeps the two-argument
+--- `drive_file(request, file_cb)` form working for the specs and for any
+--- non-mcphub embedder.
+---
+--- @class MCPHub.ApplyEditConfig
+--- @field ui table?                            Passed to `EditUI.new`. `EditUI` reads only `keybindings`, `auto_navigate` and `go_to_origin_on_complete`; its other defaults are inert here because this driver owns diagnostics reporting.
+--- @field lsp_wait_ms table<string, integer>?  Per-client ceilings, merged *over* `M.LSP_WAIT_MS`.
+--- @field default_lsp_wait_ms integer?         Ceiling for clients with no curated entry.
+--- @field diagnostic_context_lines integer?    Context window around an edited range for in-range diagnostic detail.
+
+--- Normalise a possibly-nil, possibly-partial config into the concrete values
+--- `drive_file` needs.
+---
+--- `lsp_wait_ms` is *merged over* the curated table rather than replacing it: a
+--- user overriding one client should not silently lose the ceilings for every
+--- other client. `M.LSP_WAIT_MS` is read here, at call time, so the documented
+--- post-require mutation recipe keeps working alongside the config table.
+---
+--- @param config MCPHub.ApplyEditConfig?
+--- @return { ui: table, lsp_wait_ms: table<string, integer>, default_lsp_wait_ms: integer, diagnostic_context_lines: integer }
+local function resolve_config(config)
+    config = config or {}
+    return {
+        ui = config.ui or {},
+        lsp_wait_ms = vim.tbl_extend("force", M.LSP_WAIT_MS, config.lsp_wait_ms or {}),
+        default_lsp_wait_ms = config.default_lsp_wait_ms or DEFAULT_LSP_WAIT_MS,
+        diagnostic_context_lines = config.diagnostic_context_lines or DEFAULT_DIAGNOSTIC_CONTEXT_LINES,
+    }
+end
+
 --- Drive one file's edits through `EditUI`. Implements the `drive_file`
 --- contract from `mcphub.native.neovim.files.apply_edit.applier.apply_plan`.
 ---
 --- @param request  mcphub.edit.applier.FileRequest
 --- @param file_cb  fun(outcome: mcphub.edit.applier.FileOutcome)
-function M.drive_file(request, file_cb)
+--- @param config   MCPHub.ApplyEditConfig?  Optional. Absent fields fall back to this module's defaults.
+function M.drive_file(request, file_cb, config)
+    local cfg = resolve_config(config)
+
     -- Note: `EditUI` is required lazily below (just before instantiation),
     -- not at function entry, so collision-detection and no-changes paths
     -- can complete without mcphub's full plugin tree on `runtimepath`.
@@ -729,12 +774,13 @@ function M.drive_file(request, file_cb)
     -- complete without touching mcphub's plugin tree.
     local EditUI = require("mcphub.native.neovim.files.edit_file.edit_ui")
 
-    -- `EditUI.new` deep-merges over its own DEFAULT_CONFIG, so an empty table
-    -- is the correct way to say "use all defaults". mcphub's UIConfig
-    -- annotation marks every field as required, which is wrong for this
-    -- entry point — silence the diagnostic.
+    -- `EditUI.new` deep-merges its argument over its own DEFAULT_CONFIG, so a
+    -- partial table (or an empty one) is the correct way to say "defaults for
+    -- everything I did not mention". mcphub's UIConfig annotation marks every
+    -- field as required, which is wrong for this entry point — silence the
+    -- diagnostic.
     ---@diagnostic disable-next-line: missing-fields
-    local ui = EditUI.new({})
+    local ui = EditUI.new(cfg.ui)
 
     -- Both completion paths share the same epilogue: snapshot state, fetch
     -- summary (async), cleanup, hand outcome to file_cb. We must read
@@ -767,15 +813,16 @@ function M.drive_file(request, file_cb)
         -- and we `vim.defer_fn` our own `collect_diagnostics` by the per-LSP
         -- ceiling so we still read a fresh diagnostic set.
         --
-        -- The wait time is selected per-LSP via `M.LSP_WAIT_MS`. When the
+        -- The wait time is selected per-LSP via `cfg.lsp_wait_ms` (this
+        -- module's curated table plus any user overrides). When the
         -- buffer has no LSP attached the resolver returns 0 — no publisher
         -- exists, so the wait is dead time (felt as latency in headless tests
         -- and on untyped-file edits). With multiple LSPs attached the
         -- resolver picks the max so we hear from all of them.
         local lsp_wait_ms = resolve_lsp_wait_ms(
             vim.lsp.get_clients({ bufnr = bufnr_for_diagnostics }),
-            M.LSP_WAIT_MS,
-            DEFAULT_LSP_WAIT_MS
+            cfg.lsp_wait_ms,
+            cfg.default_lsp_wait_ms
         )
         local summary_config = {
             include_session_summary = true,
@@ -807,7 +854,8 @@ function M.drive_file(request, file_cb)
                 -- the bufnr, but reading before cleanup keeps the temporal
                 -- order obvious and avoids surprises if mcphub ever clears
                 -- diagnostic state in `cleanup`.
-                local diagnostics, diagnostic_counts = collect_diagnostics(bufnr_for_diagnostics, edited_ranges)
+                local diagnostics, diagnostic_counts =
+                    collect_diagnostics(bufnr_for_diagnostics, edited_ranges, cfg.diagnostic_context_lines)
 
                 ui:cleanup()
                 file_cb({
@@ -850,6 +898,7 @@ M._test = {
     DEFAULT_DIAGNOSTIC_CONTEXT_LINES = DEFAULT_DIAGNOSTIC_CONTEXT_LINES,
     resolve_lsp_wait_ms = resolve_lsp_wait_ms,
     DEFAULT_LSP_WAIT_MS = DEFAULT_LSP_WAIT_MS,
+    resolve_config = resolve_config,
 }
 
 return M

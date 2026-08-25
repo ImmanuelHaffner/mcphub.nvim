@@ -53,6 +53,38 @@ local defaults = {
                 },
             },
         },
+        ---@type MCPHub.ApplyEditConfig
+        apply_edit = {
+            -- Review UI. `apply_edit` drives the same `EditUI` as `edit_file`,
+            -- but keeps its own settings instead of inheriting them: since
+            -- `edit_file` is soft-deprecated, tying the replacement's config to
+            -- it would point users at the tool they are being steered away
+            -- from. Only the three fields `EditUI` actually reads are exposed;
+            -- its `send_diagnostics` / `wait_for_diagnostics` /
+            -- `diagnostic_severity` defaults are inert on this path, because
+            -- `apply_edit` reports diagnostics itself.
+            ui = {
+                auto_navigate = true, -- Move to the next hunk after a decision
+                go_to_origin_on_complete = true,
+                keybindings = {
+                    accept = ".", -- Accept current change
+                    reject = ",", -- Reject current change
+                    next = "n", -- Next diff
+                    prev = "p", -- Previous diff
+                    accept_all = "ga", -- Accept all remaining changes
+                    reject_all = "gr", -- Reject all remaining changes
+                },
+            },
+            -- Per-client ceilings (ms) on the post-write wait for LSP
+            -- diagnostics, merged OVER the curated table in
+            -- `native/neovim/files/apply_edit/ui_backend.lua`, where the
+            -- rationale for each value lives. An entry here overrides exactly
+            -- that client, e.g. `{ metals = 8000 }`.
+            ---@type table<string, integer>
+            lsp_wait_ms = {},
+            default_lsp_wait_ms = 1000, -- Ceiling for a client with no curated entry
+            diagnostic_context_lines = 10, -- Report diagnostics within N lines of an edited range
+        },
     },
     --- Custom function to parse json file (e.g `require'json5'.parse` from `https://github.com/Joakker/lua-json5 to parse json5 syntax for .vscode/mcp.json like files)
     ---@type function | nil

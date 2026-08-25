@@ -18,6 +18,7 @@
 ---
 --- @module "mcphub.native.neovim.files.apply_edit"
 
+local State = require("mcphub.state")
 local edit = require("mcphub.native.neovim.files.apply_edit.engine")
 local edit_json = require("mcphub.native.neovim.files.apply_edit.json")
 local edit_read = require("mcphub.native.neovim.files.apply_edit.read")
@@ -388,19 +389,23 @@ local apply_edit_tool = {
         -- `EditUI` backend (the production driver). The completion callback
         -- encodes the response and dispatches it on the mcphub `res` channel.
         local ui_backend = require("mcphub.native.neovim.files.apply_edit.ui_backend")
-        local drive_file = ui_backend.drive_file
-        if req.caller and req.caller.auto_approve == true then
-            -- Honour auto-approve by skipping per-hunk review. This is delivered
-            -- through the DRIVER, not through an opts table: `edit.apply` is
-            -- deliberately opts-free so that no configuration path (notably
-            -- `bypass_fingerprint`) is reachable from the LLM-facing surface.
-            -- See the "LLM-facing seal" note in `engine.lua`. The driver is a
-            -- continuation, not configuration, so overriding `interactive` here
-            -- keeps that invariant intact.
-            drive_file = function(request, file_cb)
+        -- Per-tool user configuration. Read at call time rather than at module
+        -- scope, because `State.config` is empty until mcphub's `setup()` runs.
+        local config = (State.config.builtin_tools or {}).apply_edit
+        local auto_approve = req.caller and req.caller.auto_approve == true
+        -- Both the user config and `auto_approve` reach the engine through the
+        -- DRIVER, never through an opts table: `edit.apply` is deliberately
+        -- opts-free so that no configuration path (notably
+        -- `bypass_fingerprint`) is reachable from the LLM-facing surface. See
+        -- the "LLM-facing seal" note in `engine.lua`. A driver is a
+        -- continuation, not configuration, so delivering both here keeps that
+        -- invariant intact.
+        local drive_file = function(request, file_cb)
+            if auto_approve then
+                -- Honour auto-approve by skipping per-hunk review.
                 request.interactive = false
-                return ui_backend.drive_file(request, file_cb)
             end
+            return ui_backend.drive_file(request, file_cb, config)
         end
         edit.apply(req.params or {}, drive_file, function(response)
             -- Scrub the response to well-formed UTF-8 before encoding.

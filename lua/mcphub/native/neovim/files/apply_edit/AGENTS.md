@@ -14,6 +14,7 @@ maintainer can edit it without re-deriving the design from first principles.
 - [Module-by-module orientation](#module-by-module-orientation)
 - [Test layout](#test-layout)
 - [Footguns](#footguns)
+- [Configuration](#configuration)
 - [Deferred work](#deferred-work)
 
 ## Architecture and module boundaries
@@ -30,8 +31,9 @@ apply_edit/*.lua          ← pure engine: engine, schema, planner,
 
 apply_edit/init.lua       ← the MCP tool surface: the two tools' JSON
                             schemas, descriptions and handlers, which
-                            files/init.lua registers. Requires nothing
-                            from mcphub itself.
+                            files/init.lua registers. Reaches into
+                            mcphub only for State, to read this tool's
+                            user config.
 
 apply_edit/ui_backend.lua ← the mcphub bridge. The only file here that
                             reaches outside this directory, and it does
@@ -39,18 +41,20 @@ apply_edit/ui_backend.lua ← the mcphub bridge. The only file here that
 ```
 
 The boundary is **grep-enforceable**: every `require` in this directory
-resolves inside `apply_edit/*` except one.
+resolves inside `apply_edit/*` except two.
 
 ```
-rg 'require\("mcphub' lua/mcphub/native/neovim/files/apply_edit/ \
-  | rg -v 'apply_edit\.'   # MUST match only ui_backend.lua's EditUI
+rg 'require\("mcphub' lua/mcphub/native/neovim/files/apply_edit/ -g '*.lua' \
+  | rg -v 'apply_edit\.' \
+  | rg -v -- '---'   # drop the docstring/README setup() examples
+# MUST match exactly two: ui_backend.lua's EditUI, init.lua's mcphub.state
 ```
 
-Note that `init.lua` requires nothing from mcphub at all — not even
-`mcphub.state`, which `edit_file`'s tool surface does use. The engine's
-opts-free seal (see *Single LLM-facing entry point*) means there is no
-per-tool configuration to read yet; when there is, it arrives as
-`State.config.builtin_tools.apply_edit` like every other builtin tool.
+Note the shape of `init.lua`'s single mcphub import: it requires
+`mcphub.state` *only* to read `State.config.builtin_tools.apply_edit`
+and pass it to the driver. It never hands configuration to
+`edit.apply`, because the engine's opts-free seal (see *Single
+LLM-facing entry point*) has to hold. See *Configuration* below.
 
 Test layout mirrors the split: engine specs must not import mcphub,
 bridge specs may. See *Test layout* below.
@@ -539,6 +543,45 @@ read_with_fingerprint). Do NOT go back to a bare
 `pcall(vim.json.encode, response)` at either handler — that reopens
 this bug. Covered by `test_json.lua`.
 
+## Configuration
+
+`State.config.builtin_tools.apply_edit`, with defaults declared in
+`mcphub/config.lua` — the same house pattern `edit_file` uses.
+
+Three things about it are deliberate.
+
+**It travels through the driver, not the engine.** `init.lua` reads the
+table and closes over it in the same `drive_file` wrapper it already
+builds for `auto_approve`; `ui_backend.drive_file` takes it as an
+optional third argument. `edit.apply` stays opts-free, so
+`bypass_fingerprint` remains unreachable from the LLM-facing surface (see
+*Single LLM-facing entry point*). An absent config means "module
+defaults", which keeps the two-argument `drive_file(request, file_cb)`
+form — used by every spec and by any non-mcphub embedder — working
+unchanged.
+
+**`ui` exposes only what `EditUI` actually reads.** `EditUI` consumes
+exactly three of its config fields: `keybindings`, `auto_navigate` and
+`go_to_origin_on_complete`. Its `send_diagnostics`,
+`wait_for_diagnostics` and `diagnostic_severity` defaults are inert on
+our path, because `drive_file` passes `send_diagnostics = false` to
+`get_summary` and then owns the settle wait and the severity handling
+itself (see the long comment in `finalise`). Exposing them would ship a
+knob that silently does nothing.
+
+**It does not inherit `edit_file`'s config.** `apply_edit` drives the
+same `EditUI`, so inheriting would let one setting govern both reviews —
+but `edit_file` is soft-deprecated (`mcphub.utils.deprecation`), and
+tying the replacement's configuration to the tool it replaces points
+users at the wrong place. The defaults are declared independently and
+happen to match `EditUI`'s own.
+
+`lsp_wait_ms` is *merged over* `ui_backend.M.LSP_WAIT_MS` rather than
+replacing it, so tuning one client keeps the curated ceilings for every
+other. `resolve_config` is the single place normalisation happens, and it
+is exposed as `_test.resolve_config` so the spec can pin those semantics
+without standing up `EditUI`.
+
 ## Deferred work
 
 Things intentionally not done. Listed here so a maintainer doesn't
@@ -610,16 +653,6 @@ would let the LLM look up the full protocol on demand without bloating
 every tool-listing context. Concern: more surface to maintain, and the
 LLM might not use it. Defer until there is signal that pointing at this
 directory's `README.md` is insufficient.
-
-### `State.config.builtin_tools.apply_edit`
-
-`LSP_WAIT_MS` is a public field on `ui_backend`, mutated post-require
-(`DEFAULT_LSP_WAIT_MS` is file-local). The house pattern for a builtin
-tool is a `State.config.builtin_tools.<tool>` table with defaults
-declared in `mcphub/config.lua` — how `edit_file` receives its options.
-When we accumulate more knobs (LSP wait, diagnostic severity threshold,
-EditUI keymaps, …) they fold in there. Premature for one knob, so the
-seam is recorded rather than built.
 
 ### Coupling to `EditUI`
 
