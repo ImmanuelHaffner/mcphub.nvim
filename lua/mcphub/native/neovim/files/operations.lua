@@ -7,6 +7,154 @@ local deprecation = require("mcphub.utils.deprecation")
 --- wording cannot drift between the two.
 local READ_FILE_DEPRECATED = deprecation.READ_FILE
 
+---Resolve `path` to a normalised absolute path.
+---Relative paths resolve against Neovim's current working directory.
+---@param path string
+---@return string
+local function absolute(path)
+    return vim.fs.normalize(Path:new(path):absolute())
+end
+
+---Count the entries beneath `path`, recursively, for verifying a copy.
+---@param path string absolute path
+---@return integer
+local function count_entries(path)
+    local n = 0
+    for _ in vim.fs.dir(path, { depth = 64 }) do
+        n = n + 1
+    end
+    return n
+end
+
+---Delete `path`, file or directory, and confirm it is gone.
+---
+---Deliberately avoids `Path:rm`: with `recursive = false` it calls `uv.fs_unlink`
+---even on a directory (EISDIR, discarded), and with `recursive = true` it feeds a
+---plain file to `scandir`, which matches nothing. Both fail silently and return
+---nothing at all, so a caller cannot distinguish them from success.
+---@param path string absolute path
+---@return boolean ok
+---@return string? err
+local function remove(path)
+    local stat = vim.uv.fs_stat(path)
+    if not stat then
+        return true
+    end
+    if stat.type == "directory" then
+        vim.fn.delete(path, "rf")
+    else
+        vim.uv.fs_unlink(path)
+    end
+    if vim.uv.fs_stat(path) then
+        return false, "could not delete " .. path
+    end
+    return true
+end
+
+---Move `src` to `dst`, creating missing parent directories and falling back to
+---copy+delete when the two paths live on different filesystems.
+---
+---Deliberately avoids `Path:rename`, which returns `uv.fs_rename`'s status rather
+---than raising: a caller that ignores the return value cannot tell a completed
+---move from a failed one, which is exactly how this tool used to lie.
+---@param src string absolute source path
+---@param dst string absolute destination path
+---@return boolean ok
+---@return string detail how the move was performed, or why it failed
+local function move(src, dst)
+    local parent = vim.fs.dirname(dst)
+    if vim.fn.isdirectory(parent) == 0 then
+        pcall(vim.fn.mkdir, parent, "p")
+        if vim.fn.isdirectory(parent) == 0 then
+            return false, "Could not create destination directory: " .. parent
+        end
+    end
+
+    local renamed, rename_err, errname = vim.uv.fs_rename(src, dst)
+    if renamed then
+        return true, "renamed"
+    end
+    if errname ~= "EXDEV" then
+        return false, rename_err or string.format("Could not move %s to %s", src, dst)
+    end
+
+    -- EXDEV: renaming across filesystems is impossible, so copy the payload over
+    -- and only drop the source once the copy is confirmed complete.
+    local source = Path:new(src)
+    local is_dir = source:is_dir()
+    local expected = is_dir and count_entries(src) or nil
+    local copied, copy_err
+    if is_dir then
+        copied, copy_err = pcall(function()
+            source:copy({ destination = dst, recursive = true, parents = true, override = false })
+        end)
+    else
+        copied, copy_err = vim.uv.fs_copyfile(src, dst)
+    end
+    if not copied then
+        return false, string.format("Cross-device move failed while copying: %s", copy_err or "unknown error")
+    end
+
+    -- Never delete the source on the strength of a copy we have not checked.
+    if is_dir then
+        local arrived = count_entries(dst)
+        if arrived ~= expected then
+            return false,
+                string.format(
+                    "Cross-device copy of %s is incomplete (%d of %d entries); source left untouched",
+                    src,
+                    arrived,
+                    expected
+                )
+        end
+    elseif not vim.uv.fs_stat(dst) then
+        return false, "Cross-device copy reported success but " .. dst .. " does not exist"
+    end
+
+    local removed, rm_err = remove(src)
+    if not removed then
+        return false, string.format("Copied to %s but %s", dst, rm_err or ("could not remove source " .. src))
+    end
+    return true, "copied across filesystems"
+end
+
+---Re-point loaded buffers from `src` onto `dst` after a completed move.
+---`src` may be a file or a directory; buffers beneath a moved directory follow it.
+---@param src string absolute source path
+---@param dst string absolute destination path
+---@return string[] moved "old -> new" for each buffer that followed the file
+---@return string[] unsaved new names of buffers left holding unwritten changes
+local function repoint_buffers(src, dst)
+    local moved, unsaved = {}, {}
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
+            local name = vim.fs.normalize(vim.api.nvim_buf_get_name(buf))
+            local new_name
+            if name == src then
+                new_name = dst
+            elseif name:sub(1, #src + 1) == src .. "/" then
+                new_name = dst .. name:sub(#src + 1)
+            end
+            if new_name and pcall(vim.api.nvim_buf_set_name, buf, new_name) then
+                if vim.bo[buf].modified then
+                    -- Reloading would discard the unwritten changes, so leave them be.
+                    table.insert(unsaved, new_name)
+                else
+                    -- Safe only because the destination is verified to exist by now;
+                    -- reloading a buffer whose file is missing empties it.
+                    vim.api.nvim_buf_call(buf, function()
+                        pcall(function()
+                            vim.cmd("silent! edit!")
+                        end)
+                    end)
+                end
+                table.insert(moved, string.format("%s -> %s", name, new_name))
+            end
+        end
+    end
+    return moved, unsaved
+end
+
 ---Basic file operations tools
 ---@type MCPTool[]
 local file_tools = {
@@ -69,7 +217,9 @@ local file_tools = {
     },
     {
         name = "move_item",
-        description = "Move or rename a file/directory",
+        description = "Move or rename a file/directory. Creates missing parent directories, refuses to overwrite an "
+            .. "existing destination, verifies the move actually happened, and re-points any loaded buffer at the "
+            .. "new path.",
         inputSchema = {
             type = "object",
             properties = {
@@ -85,14 +235,43 @@ local file_tools = {
             required = { "path", "new_path" },
         },
         handler = function(req, res)
-            local p = Path:new(req.params.path)
-            if not p:exists() then
+            local src = absolute(req.params.path)
+            local dst = absolute(req.params.new_path)
+
+            if not vim.uv.fs_stat(src) then
                 return res:error("Source path not found: " .. req.params.path)
             end
+            if src == dst then
+                return res:error("Source and destination are the same path: " .. src)
+            end
+            if vim.uv.fs_stat(dst) then
+                return res:error("Destination already exists: " .. req.params.new_path)
+            end
 
-            local new_p = Path:new(req.params.new_path)
-            p:rename({ new_name = new_p.filename })
-            return res:text(string.format("Moved %s to %s", req.params.path, req.params.new_path)):send()
+            local ok, detail = move(src, dst)
+            if not ok then
+                return res:error(detail)
+            end
+
+            -- Confirm the outcome instead of trusting it. `uv.fs_rename` reports
+            -- failure by return value, not by raising, so an unchecked move used to
+            -- yield a cheerful success message with nothing moved.
+            if not vim.uv.fs_stat(dst) then
+                return res:error(string.format("Reported no error, but %s does not exist", dst))
+            end
+            if vim.uv.fs_stat(src) then
+                return res:error(string.format("Reported no error, but source %s is still present", src))
+            end
+
+            local lines = { string.format("Moved %s to %s (%s)", src, dst, detail) }
+            local moved, unsaved = repoint_buffers(src, dst)
+            for _, entry in ipairs(moved) do
+                table.insert(lines, "  re-pointed buffer: " .. entry)
+            end
+            for _, name in ipairs(unsaved) do
+                table.insert(lines, "  NOTE: " .. name .. " has unsaved changes; write it to keep them")
+            end
+            return res:text(table.concat(lines, "\n")):send()
         end,
     },
     {
@@ -215,9 +394,7 @@ local file_tools = {
                 if not p:exists() then
                     table.insert(errors, string.format("Path %d not found: %s", i, path))
                 else
-                    local success, err = pcall(function()
-                        p:rm()
-                    end)
+                    local success, err = remove(absolute(path))
 
                     if success then
                         table.insert(results, {
