@@ -1,5 +1,6 @@
 local M = {}
 local async = require("plenary.async")
+local fence = require("mcphub.utils.fence")
 local shared = require("mcphub.extensions.shared")
 local size_guard = require("mcphub.extensions.codecompanion.size_guard")
 
@@ -168,12 +169,10 @@ function M.create_output_handlers(display_name, has_function_calling, opts)
             local err_msg = string.format(
                 [[**`%s` Tool**: Failed with the following error:
 
-````
 %s
-````
 ]],
                 formatted_name,
-                err_data
+                fence.code_block(err_data)
             )
             add_tool_output(display_name, self, chat, err_msg, true, has_function_calling, opts, nil, {})
         end,
@@ -195,11 +194,9 @@ function M.create_output_handlers(display_name, has_function_calling, opts)
                 to_llm = string.format(
                     [[**`%s` Tool**: Returned the following:
 
-````
-%s
-````]],
+%s]],
                     formatted_name,
-                    result.text
+                    fence.code_block(result.text)
                 )
             end
 
@@ -218,11 +215,11 @@ function M.create_output_handlers(display_name, has_function_calling, opts)
                 if not to_llm then
                     to_llm = string.format(
                         [[**`%s` Tool**: Returned the following:
-````
-%s
-````]],
+%s]],
                         formatted_name,
-                        string.format("%d image%s returned", #result.images, #result.images > 1 and "s" or "")
+                        fence.code_block(
+                            string.format("%d image%s returned", #result.images, #result.images > 1 and "s" or "")
+                        )
                     )
                 end
 
