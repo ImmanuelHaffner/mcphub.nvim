@@ -119,6 +119,7 @@ M.DIFFERENCE_TYPE = {
 ---@field new_lines string[] Lines being added/changed
 ---@field extmark_id integer? External mark ID for this hunk (nil if not set)
 ---@field del_extmark_id integer? External mark ID for virtual lines added to this hunk
+---@field sign_extmark_id integer? External mark ID carrying the sign column markers of this hunk
 ---@field virt_lines_above boolean? Whether the removed content is rendered above the hunk
 ---@field deletion_position integer? If this hunk is a deletion, the line number where it was removed (nil if not a deletion)
 ---@field type DiffHunkType Type of change in this hunk

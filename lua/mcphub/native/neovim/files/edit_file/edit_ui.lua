@@ -53,6 +53,7 @@ end
 
 ---@class VirtLineGeometry
 ---@field width integer Display cells available to virtual lines
+---@field textoff integer Width of the gutter of that window, unavailable to virtual lines
 ---@field wrap boolean Whether the window has 'wrap' enabled
 ---@field linebreak boolean Whether the window has 'linebreak' enabled
 ---@field breakat string Value of 'breakat', the characters 'linebreak' may break at
@@ -200,6 +201,7 @@ EditUI.__index = EditUI
 ---@field current_hunk_index integer Currently active hunk (1-based)
 ---@field original_keymaps table<string, table|nil> Stored original keymaps before session
 ---@field virt_line_geometry VirtLineGeometry? Geometry the removed virtual lines were last built for
+---@field signcolumn table? Window whose 'signcolumn' was forced, and its previous value
 
 -- Default UI configuration
 local DEFAULT_CONFIG = {
@@ -274,6 +276,7 @@ function EditUI:start_interactive_editing(opts)
         return self:_handle_save()
     end
 
+    self:_pin_signcolumn()
     self:_highlight_all_blocks()
 
     self:_setup_keybindings()
@@ -386,6 +389,20 @@ function EditUI:_generate_hunk_blocks()
     return self.state.hunk_blocks
 end
 
+--- Force a visible sign column on the window showing the edited buffer, remembering the
+--- window's own value for `cleanup()`. Added lines are marked with a sign, which 'signcolumn'
+--- at `no` would not draw at all, and which under `auto` would make the column appear only
+--- once the first sign is placed — changing `textoff` and with it the gutter width the
+--- removed lines are padded to, after they have been built.
+function EditUI:_pin_signcolumn()
+    local winid = self:_get_window_for_buffer()
+    if not winid then
+        return
+    end
+    self.state.signcolumn = { winid = winid, value = vim.wo[winid].signcolumn }
+    vim.wo[winid].signcolumn = "yes"
+end
+
 -- Highlight hunk blocks in the buffer (new hunk-based approach)
 function EditUI:_highlight_all_blocks()
     vim.api.nvim_buf_clear_namespace(self.state.bufnr, self.highlights.namespace_diff, 0, -1)
@@ -414,6 +431,22 @@ function EditUI:_highlight_hunk_block(hunk_block)
                 end_row = hunk_block.applied_end_line,
                 hl_eol = true,
                 hl_mode = "combine",
+                priority = self.highlights.priority,
+            }
+        )
+
+        -- A ranged extmark signs every line it covers, so one extmark carries the whole
+        -- hunk. Its `end_row` is inclusive, unlike the band's above, whose exclusive bound
+        -- the accept and reject arithmetic of `_validate_hunk_block` relies on.
+        hunk_block.sign_extmark_id = vim.api.nvim_buf_set_extmark(
+            self.state.bufnr,
+            self.highlights.namespace_diff,
+            hunk_block.applied_start_line - 1,
+            0,
+            {
+                end_row = hunk_block.applied_end_line - 1,
+                sign_text = "+",
+                sign_hl_group = text.highlights.diff_add_sign,
                 priority = self.highlights.priority,
             }
         )
@@ -457,6 +490,7 @@ function EditUI:_get_virt_line_geometry()
     if not winid or not vim.api.nvim_win_is_valid(winid) then
         return {
             width = vim.o.columns,
+            textoff = 0,
             wrap = false,
             linebreak = false,
             breakat = vim.o.breakat,
@@ -470,9 +504,11 @@ function EditUI:_get_virt_line_geometry()
     -- Virtual lines start at the text area, so the gutter (number, sign and fold
     -- columns, reported as `textoff`) is not available to them.
     local info = vim.fn.getwininfo(winid)[1]
-    local width = info and (info.width - info.textoff) or vim.api.nvim_win_get_width(winid)
+    local textoff = info and info.textoff or 0
+    local width = info and (info.width - textoff) or vim.api.nvim_win_get_width(winid)
     return {
         width = math.max(width, 1),
+        textoff = textoff,
         wrap = vim.wo[winid].wrap,
         linebreak = vim.wo[winid].linebreak,
         breakat = vim.o.breakat,
@@ -492,8 +528,24 @@ function EditUI:_build_deletion_virt_lines(hunk_block)
     self.state.virt_line_geometry = geometry
 
     local virt_lines = {}
+
+    -- Removed lines are drawn from the leftmost window column (`virt_lines_leftcol`), so
+    -- their gutter is built by hand: a marker where the sign column sits, padded up to
+    -- `textoff` so that the removed text lines up with the real text around it. Like a
+    -- real sign, the marker only appears on the first screen row of a wrapped line.
+    local function gutter_chunks(is_first_row)
+        if geometry.textoff <= 0 then
+            return {}
+        end
+        return {
+            { is_first_row and "-" or " ", text.highlights.diff_delete_sign },
+            { string.rep(" ", geometry.textoff - 1), text.highlights.diff_delete },
+        }
+    end
+
     local function add(line)
-        for _, row in ipairs(geometry.wrap and soft_wrap(line, geometry) or { line }) do
+        local rows = geometry.wrap and soft_wrap(line, geometry) or { line }
+        for index, row in ipairs(rows) do
             -- With 'wrap' fill exactly the text area. With 'nowrap' the row scrolls
             -- horizontally instead, so extend the highlight one window past its own
             -- content to keep the band solid while scrolling through it.
@@ -502,7 +554,9 @@ function EditUI:_build_deletion_virt_lines(hunk_block)
                 pad_width = math.max(vim.o.columns, display_width(row, geometry.tabstop, 0) + geometry.width)
             end
             local padded = pad_to_width(row, pad_width, geometry.tabstop)
-            table.insert(virt_lines, { { padded, text.highlights.diff_delete } })
+            local chunks = gutter_chunks(index == 1)
+            table.insert(chunks, { padded, text.highlights.diff_delete })
+            table.insert(virt_lines, chunks)
         end
     end
 
@@ -523,9 +577,15 @@ end
 ---@param hunk_block DiffHunk Hunk whose `old_lines` are rendered as removed content
 ---@return table opts Options for |nvim_buf_set_extmark()|
 function EditUI:_deletion_extmark_opts(hunk_block)
+    -- Build the removed lines first: the geometry they were built for is read below, and
+    -- the evaluation order of the fields of a table constructor is not guaranteed.
+    local virt_lines = self:_build_deletion_virt_lines(hunk_block)
     local extmark_opts = {
-        virt_lines = self:_build_deletion_virt_lines(hunk_block),
+        virt_lines = virt_lines,
         virt_lines_above = hunk_block.virt_lines_above,
+        -- The hand-drawn gutter only lands in the gutter when the virtual lines start at
+        -- the leftmost window column instead of at the text area.
+        virt_lines_leftcol = self.state.virt_line_geometry.textoff > 0,
         priority = self.highlights.priority,
     }
 
@@ -1067,6 +1127,15 @@ function EditUI:_remove_hunk_highlights(hunk_block)
         pcall(vim.api.nvim_buf_del_extmark, self.state.bufnr, self.highlights.namespace_diff, hunk_block.del_extmark_id)
         hunk_block.del_extmark_id = nil
     end
+    if hunk_block.sign_extmark_id then
+        pcall(
+            vim.api.nvim_buf_del_extmark,
+            self.state.bufnr,
+            self.highlights.namespace_diff,
+            hunk_block.sign_extmark_id
+        )
+        hunk_block.sign_extmark_id = nil
+    end
     -- Clear current hint for the removed block's line
     vim.api.nvim_buf_clear_namespace(self.state.bufnr, self.highlights.namespace_hints, 0, -1)
 end
@@ -1438,6 +1507,12 @@ function EditUI:cleanup()
         if self.state.original_keymaps then
             keymap_utils.restore_keymaps("n", self.config.keybindings, bufnr, self.state.original_keymaps)
         end
+    end
+
+    -- Give the window its own 'signcolumn' back
+    local pinned = self.state.signcolumn
+    if pinned and vim.api.nvim_win_is_valid(pinned.winid) then
+        vim.wo[pinned.winid].signcolumn = pinned.value
     end
 
     -- Clean up autocommands

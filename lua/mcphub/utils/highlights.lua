@@ -41,14 +41,18 @@ M.groups = {
     code = "MCPHubCode", -- Code blocks
     heading = "MCPHubHeading", -- Markdown headings
     -- Diff visualization highlights
-    diff_add = "MCPHubDiffAdd", -- New content being added
+    diff_add = "MCPHubDiffAdd", -- Background band behind added lines
+    diff_add_sign = "MCPHubDiffAddSign", -- Sign column marker on added lines
     diff_change = "MCPHubDiffChange", -- New content being added
-    diff_delete = "MCPHubDiffDelete", -- Content being removed
+    diff_delete = "MCPHubDiffDelete", -- Band behind removed lines
+    diff_delete_sign = "MCPHubDiffDeleteSign", -- Gutter marker on removed lines
 }
 
 -- Get highlight attributes from a highlight group
 local function get_hl_attrs(name)
-    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name })
+    -- `link = false` resolves links, so a group a colorscheme defines as a link to another
+    -- one still yields effective attributes here instead of just the linked group's name.
+    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
     if not ok or not hl then
         return {}
     end
@@ -63,6 +67,24 @@ local function get_color(group, attr, fallback)
         val = fallback
     end
     return val
+end
+
+--- Mix `color` into `base`.
+---@param color string Colour mixed in, as `#rrggbb`
+---@param base string Colour mixed into, as `#rrggbb`
+---@param alpha number Share of `color` in the result, in [0, 1]
+---@return string blended Result as `#rrggbb`
+local function blend(color, base, alpha)
+    local function channels(value)
+        local rgb = tonumber(value:sub(2), 16) or 0
+        return math.floor(rgb / 65536) % 256, math.floor(rgb / 256) % 256, rgb % 256
+    end
+    local color_r, color_g, color_b = channels(color)
+    local base_r, base_g, base_b = channels(base)
+    local function mix(front, back)
+        return math.floor(front * alpha + back * (1 - alpha) + 0.5)
+    end
+    return string.format("#%02x%02x%02x", mix(color_r, base_r), mix(color_g, base_g), mix(color_b, base_b))
 end
 
 -- Apply highlight groups
@@ -87,6 +109,14 @@ function M.apply_highlights()
     local pmenu_sel_fg = get_color("PmenuSel", "fg", "#d4d4d4")
     local special_key = get_color("Special", "fg", "#ff966c")
     local title_color = get_color("Title", "fg", "#c792ea")
+
+    -- Diff colours. The bands come from the colorscheme's diff backgrounds, which are
+    -- already tuned to sit on 'Normal', and the markers from the standard `Added` and
+    -- `Removed` groups. Without a diff background, tint 'Normal' with the marker colour.
+    local add_fg = get_color("Added", "fg", get_color("DiffAdd", "fg", "#1abc9c"))
+    local del_fg = get_color("Removed", "fg", get_color("DiffDelete", "fg", "#db4b4b"))
+    local add_bg = get_color("DiffAdd", "bg", blend(add_fg, normal_bg, 0.12))
+    local del_bg = get_color("DiffDelete", "bg", blend(del_fg, normal_bg, 0.12))
 
     local highlights = {
         -- Title and headers
@@ -197,21 +227,28 @@ function M.apply_highlights()
         -- Seamless border (matches float background)
         [M.groups.seamless_border] = "FloatBorder",
 
-        -- Diff visualization highlights
-        -- [M.groups.diff_add] = "DiffAdd",
-        -- [M.groups.diff_change] = "DiffChange",
-        -- [M.groups.diff_delete] = "DiffDelete",
-        -- Add shaded background for diff highlights
+        -- Diff visualization highlights. The added band lies on real buffer lines at a
+        -- priority above treesitter, so it carries a background only: a foreground here
+        -- would replace their syntax highlighting. Removed lines are virtual text without
+        -- syntax of their own, so their band does set one.
         [M.groups.diff_add] = {
-            bg = "#1a2b32",
-            fg = "#1abc9c",
+            bg = add_bg,
+        },
+        [M.groups.diff_add_sign] = {
+            fg = add_fg,
+            bg = "NONE",
             bold = true,
         },
         [M.groups.diff_change] = "DiffChange",
         [M.groups.diff_delete] = {
-            bg = "#2d202a",
-            fg = "#db4b4b",
+            bg = del_bg,
+            fg = del_fg,
             italic = true,
+        },
+        [M.groups.diff_delete_sign] = {
+            fg = del_fg,
+            bg = del_bg,
+            bold = true,
         },
     }
 
