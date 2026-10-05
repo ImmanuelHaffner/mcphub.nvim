@@ -1382,6 +1382,19 @@ function MCPHub:ensure_ready()
     return true
 end
 
+--- Make empty `inputSchema.properties` encode as a JSON object rather than an array.
+--- Native tools may declare `inputSchema` as a function; those are skipped here and
+--- handled once `resolve_native_server` has turned them into tables.
+---@param tools? table[]
+local function normalize_empty_properties(tools)
+    for _, tool in ipairs(tools or {}) do
+        local schema = tool.inputSchema
+        if type(schema) == "table" and type(schema.properties) == "table" and not next(schema.properties) then
+            schema.properties = vim.empty_dict()
+        end
+    end
+end
+
 --- Get servers with their tools filtered based on server config
 --- @param server MCPServer The server object to filter
 ---@return table[] Array of connected servers with disabled tools filtered out
@@ -1405,14 +1418,7 @@ local function filter_server_capabilities(server)
             prompts = { list = "disabled_prompts", id = "name" },
         }
 
-        --- Make the properties field in inputSchema will be encoded as a object not array when empty
-        if filtered_server.capabilities.tools then
-            for _, tool in ipairs(filtered_server.capabilities.tools) do
-                if tool.inputSchema and tool.inputSchema.properties and not next(tool.inputSchema.properties) then
-                    tool.inputSchema.properties = vim.empty_dict()
-                end
-            end
-        end
+        normalize_empty_properties(filtered_server.capabilities.tools)
 
         for cap_type, filter in pairs(capability_filters) do
             if filtered_server.capabilities[cap_type] then
@@ -1453,6 +1459,7 @@ local function resolve_native_server(native_server)
             end
         end
     end
+    normalize_empty_properties(server.capabilities.tools)
     return server
 end
 
