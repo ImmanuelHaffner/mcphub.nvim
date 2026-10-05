@@ -102,13 +102,28 @@ T["timeout"]["rejects invalid values without spawning"] = function()
     eq(next(exec.jobs), nil)
 end
 
-T["timeout"]["refuses exemptions that need confirmation"] = function()
-    for _, value in ipairs({ 0, 601 }) do
+-- The handler trusts its caller here: NativeServer:call_tool has already
+-- refused exemptions the user did not confirm (tests/extensions/test_shared.lua).
+T["timeout"]["0 runs without a timer"] = function()
+    State.config.builtin_tools = { execute_command = { timeout_default = 1 } }
+    local result = call({ command = "sleep 2; echo done", cwd = "/tmp", timeout = 0 })
+    eq(result.isError, nil)
+    eq(result.content[1].text:find("Exit Code: 0\n", 1, true) ~= nil, true)
+end
+
+T["timeout"]["clamps a confirmed huge timeout"] = function()
+    for _, value in ipairs({ 1e300, math.huge }) do
         local result = call({ command = "true", cwd = "/tmp", timeout = value })
-        eq(result.isError, true)
-        eq(result.content[1].text:find("requires the user's confirmation", 1, true) ~= nil, true)
+        eq(result.isError, nil)
     end
-    eq(next(exec.jobs), nil)
+end
+
+T["timeout"]["confirm_if names exemptions only"] = function()
+    eq(exec_command.confirm_if({ timeout = 0 }), "no timeout requested (timeout = 0)")
+    eq(exec_command.confirm_if({ timeout = 601 }), "timeout 601 s exceeds the 600 s soft limit")
+    for _, args in ipairs({ {}, { timeout = 600 }, { timeout = "0" }, { timeout = -1 } }) do
+        eq(exec_command.confirm_if(args), nil)
+    end
 end
 
 T["timeout"]["keeps the output captured so far"] = function()

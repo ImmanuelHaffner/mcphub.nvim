@@ -18,6 +18,10 @@ local M = {}
 
 local DEFAULT_TIMEOUT, DEFAULT_SOFT_LIMIT = 30, 600
 
+--- Longest timer libuv accepts reliably (about 24.8 days); a confirmed
+--- timeout beyond it, `math.huge` included, is clamped rather than overflowing.
+local MAX_TIMER_MS = 0x7fffffff
+
 --- Read at call time, because `State.config` is empty until mcphub's `setup()`
 --- runs.
 ---@return MCPHub.ExecuteCommandConfig
@@ -49,27 +53,38 @@ local function size(n)
     return ("%d bytes"):format(n)
 end
 
---- The timeout a call runs under, in seconds. An absent `timeout` takes the
---- configured default.
+--- The timeout a call runs under, in seconds; `0` means none. An absent
+--- `timeout` takes the configured default. Exemptions from the soft limit are
+--- not checked here: `confirm_if` has the user approve them before the call.
 ---@param value any The call's `timeout` argument
 ---@return number? seconds
 ---@return string? err
 function M.resolve_timeout(value)
-    local default, soft = timeouts()
     if value == nil or value == vim.NIL then
-        return default
+        return (timeouts())
     end
     if type(value) ~= "number" or value ~= value or value < 0 then
         return nil, ("timeout must be a non-negative number of seconds, got %s"):format(vim.inspect(value))
     end
-    if value == 0 or value > soft then
-        return nil,
-            ("%s requires the user's confirmation, which execute_command cannot request yet; pass a timeout of at most %s"):format(
-                value == 0 and "timeout = 0 (no timeout)" or ("timeout %s"):format(seconds(value)),
-                seconds(soft)
-            )
-    end
     return value
+end
+
+--- Why a call needs the user's confirmation despite auto-approval, if it does.
+--- Invalid timeouts pass, so the handler can reject them without a prompt.
+---@param args table The call's arguments
+---@return string? reason
+function M.confirm_if(args)
+    local t = args and args.timeout
+    if type(t) ~= "number" then
+        return nil
+    end
+    local _, soft = timeouts()
+    if t == 0 then
+        return "no timeout requested (timeout = 0)"
+    end
+    if t > soft then
+        return ("timeout %s exceeds the %s soft limit"):format(seconds(t), seconds(soft))
+    end
 end
 
 ---@return string
@@ -192,7 +207,7 @@ function M.handler(req, res)
         cwd = path:absolute(),
         capture_bytes = config().capture_bytes,
         kill_ladder = config().kill_ladder,
-        timeout_ms = math.max(1, math.floor(timeout * 1000 + 0.5)),
+        timeout_ms = timeout > 0 and math.max(1, math.min(math.floor(timeout * 1000 + 0.5), MAX_TIMER_MS)) or nil,
         on_exit = function(job)
             local text = M.format_result(job)
             if job.reason == "timeout" then
@@ -212,6 +227,7 @@ M.definition = {
     name = "execute_command",
     description = M.description,
     inputSchema = M.input_schema,
+    confirm_if = M.confirm_if,
     handler = M.handler,
 }
 

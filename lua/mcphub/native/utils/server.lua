@@ -2,6 +2,7 @@ local Request = require("mcphub.native.utils.request")
 local Response = require("mcphub.native.utils.response")
 local State = require("mcphub.state")
 local buf_utils = require("mcphub.native.neovim.utils.buffer")
+local confirmation = require("mcphub.native.utils.confirmation")
 local log = require("mcphub.utils.log")
 
 ---@class MCPTool
@@ -10,6 +11,7 @@ local log = require("mcphub.utils.log")
 ---@field inputSchema? table|fun():table JSON Schema for input validation or function returning schema
 ---@field handler fun(req: ToolRequest, res: ToolResponse): nil | table Tool handler function
 ---@field needs_confirmation_window? boolean Whether the tool requires a confirmation window before execution
+---@field confirm_if? fun(args: table): string? Why a call must be confirmed by the user despite auto-approval
 
 ---@class MCPResource
 ---@field name? string Resource identifier
@@ -309,6 +311,16 @@ function NativeServer:call_tool(name, arguments, opts)
     if not tool then
         local err = string.format("Tool '%s' not found", name)
         log.warn(string.format("Tool '%s' not found", name))
+        return output_handler(nil, err)
+    end
+    local forced_reason = confirmation.reason(tool, arguments)
+    if forced_reason and not confirmation.consume(arguments) then
+        local err = string.format(
+            "Tool '%s' was refused: it needs the user's confirmation (%s), which this caller did not obtain",
+            name,
+            forced_reason
+        )
+        log.warn(err)
         return output_handler(nil, err)
     end
 

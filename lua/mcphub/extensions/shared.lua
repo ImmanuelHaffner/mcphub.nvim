@@ -2,6 +2,7 @@ local M = {}
 local NuiLine = require("mcphub.utils.nuiline")
 local State = require("mcphub.state")
 local Text = require("mcphub.utils.text")
+local confirmation = require("mcphub.native.utils.confirmation")
 local native = require("mcphub.native")
 local ui_utils = require("mcphub.utils.ui")
 local utils = require("mcphub.utils")
@@ -15,6 +16,7 @@ local utils = require("mcphub.utils")
 ---@field uri string URI of the resource to access (nil for tools)
 ---@field is_auto_approved_in_server boolean Whether the tool autoApproved in the servers.json
 ---@field needs_confirmation_window boolean Whether the tool call needs a confirmation window
+---@field forced_reason string? Why the call must be confirmed whatever the auto-approve settings say
 
 ---@class MCPHub.ToolCallArgs
 ---@field server_name string Name of the server to call the tool on.
@@ -91,7 +93,29 @@ function M.parse_params(params, action_name)
         uri = uri or "nil",
         needs_confirmation_window = M.needs_confirmation_window(server_name, tool_name),
         is_auto_approved_in_server = M.is_auto_approved_in_server(server_name, tool_name),
+        forced_reason = action_name == "use_mcp_tool"
+                and M.forced_confirmation_reason(server_name, tool_name, arguments)
+            or nil,
     }
+end
+
+--- Why the call must be confirmed whatever the auto-approve settings say, if
+--- its native tool declares `confirm_if` and objects to these arguments.
+---@param server_name string?
+---@param tool_name string?
+---@param arguments table
+---@return string? reason
+function M.forced_confirmation_reason(server_name, tool_name, arguments)
+    local server = server_name and native.is_native_server(server_name)
+    if not server then
+        return nil
+    end
+    for _, tool in ipairs(server.capabilities.tools) do
+        if tool.name == tool_name then
+            return confirmation.reason(tool, arguments)
+        end
+    end
+    return nil
 end
 
 --- For some built-in tools, we already show interactive diffs, before confirmation.
@@ -223,6 +247,13 @@ function M.show_mcp_tool_prompt(params)
     header_line:append("?", Text.highlights.text)
     table.insert(lines, header_line)
 
+    if params.forced_reason then
+        local reason_line = NuiLine()
+        reason_line:append(Text.icons.warn .. " Confirmation required: ", Text.highlights.warn)
+        reason_line:append(params.forced_reason, Text.highlights.warn_italic)
+        table.insert(lines, reason_line)
+    end
+
     -- Parameters section
     if is_tool and next(arguments) then
         table.insert(lines, NuiLine():append(""))
@@ -321,8 +352,11 @@ function M.handle_auto_approval_decision(parsed_params)
         return { error = status.error or "Something went wrong with auto-approval", approve = false }
     end
 
-    if status.approve == false and parsed_params.needs_confirmation_window then
+    if parsed_params.forced_reason or (status.approve == false and parsed_params.needs_confirmation_window) then
         local confirmed, _ = M.show_mcp_tool_prompt(parsed_params)
+        if confirmed and parsed_params.forced_reason then
+            confirmation.grant(parsed_params.arguments)
+        end
         return { error = not confirmed and "User cancelled the operation", approve = confirmed }
     end
     return status

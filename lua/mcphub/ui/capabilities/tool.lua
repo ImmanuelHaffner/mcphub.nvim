@@ -235,6 +235,8 @@ function ToolHandler:execute()
     end
 
     log.debug(string.format("Executing tool %s with parameters: %s", self.def.name, vim.inspect(converted_values)))
+    -- Submitting the form is the user's own confirmation.
+    require("mcphub.native.utils.confirmation").grant(converted_values)
     -- Execute tool
     if State.hub_instance then
         State.hub_instance:call_tool(self.server_name, self.def.name, converted_values, {
