@@ -266,6 +266,32 @@ end
 local write_seq = 0
 
 --- Write `text` to a unique file in the spill dir and return its absolute path.
+--- Reserve a unique path in the spill dir, creating the directory if needed.
+---
+--- Names follow `<slug>-YYYYMMDD-HHMMSS-XXXXXXXX.<ext>`, the pattern `gc()`
+--- sweeps, so anything written there ages out like every other spill file.
+---
+--- @param label string|nil Slugified into the file name; `"output"` when empty.
+--- @param ext string        Extension without the dot; lowercase letters only.
+--- @param opts? { dir?: string }
+--- @return string|nil path  Absolute path on success. The file is not created.
+--- @return string|nil err   Error message on failure.
+function M.new_path(label, ext, opts)
+    local dir = (opts and opts.dir) or M.DIR
+    -- `vim.fn.mkdir` RAISES on an unwritable path (E739) rather than returning
+    -- false, which would break the "return nil, err" contract here and in
+    -- `write()`, and through it the truncated-preview fallback in `spill()`.
+    local made, mkdir_err = pcall(vim.fn.mkdir, dir, "p")
+    if not made then
+        return nil, tostring(mkdir_err)
+    end
+    write_seq = write_seq + 1
+    local ts = os.date("%Y%m%d-%H%M%S")
+    local rand = string.format("%04x%04x", write_seq % 0xffff, math.random(0, 0xffff))
+    return string.format("%s/%s-%s-%s.%s", dir, slugify(label), ts, rand, ext)
+end
+
+--- Write `text` to a unique file in the spill dir and return its absolute path.
 ---
 --- The directory is created if needed. The extension follows a content sniff
 --- (json → `.json`, xml → `.xml`, else `.txt`) so editors and tools pick up
@@ -278,19 +304,11 @@ local write_seq = 0
 --- @return string|nil format Detected format on success.
 function M.write(text, opts)
     opts = opts or {}
-    local dir = opts.dir or M.DIR
-    -- `vim.fn.mkdir` RAISES on an unwritable path (E739) rather than returning
-    -- false, which would break this function's "return nil, err" contract and,
-    -- through it, the truncated-preview fallback in `spill()`. Contain it here.
-    local made, mkdir_err = pcall(vim.fn.mkdir, dir, "p")
-    if not made then
-        return nil, tostring(mkdir_err), nil
-    end
-    write_seq = write_seq + 1
-    local ts = os.date("%Y%m%d-%H%M%S")
-    local rand = string.format("%04x%04x", write_seq % 0xffff, math.random(0, 0xffff))
     local format = detect_format(text)
-    local path = string.format("%s/%s-%s-%s.%s", dir, slugify(opts.label), ts, rand, FORMAT_EXT[format])
+    local path, path_err = M.new_path(opts.label, FORMAT_EXT[format], opts)
+    if not path then
+        return nil, path_err, nil
+    end
     local fd, err = io.open(path, "w")
     if not fd then
         return nil, err, nil
@@ -409,6 +427,7 @@ M.DEFAULT_GC_PERIOD_MINUTES = 60
 ---   `<slug>-YYYYMMDD-HHMMSS-XXXXXXXX.<ext>`
 --- `gc()` uses it so a user's own files in the spill dir are never touched.
 local SPILL_FILE_PATTERN = "^.+%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d%-[%da-f]+%.[a-z]+$"
+M._FILE_PATTERN = SPILL_FILE_PATTERN
 
 --- Stat helper returning size + mtime seconds, or nil.
 local function file_stat(path)

@@ -85,6 +85,10 @@ local defaults = {
             default_lsp_wait_ms = 1000, -- Ceiling for a client with no curated entry
             diagnostic_context_lines = 10, -- Report diagnostics within N lines of an edited range
         },
+        ---@type MCPHub.ExecuteCommandConfig
+        execute_command = {
+            capture_bytes = 4 * 1024 * 1024, -- Output kept in memory per stream; the full output goes to a log file
+        },
     },
     --- Custom function to parse json file (e.g `require'json5'.parse` from `https://github.com/Joakker/lua-json5 to parse json5 syntax for .vscode/mcp.json like files)
     ---@type function | nil

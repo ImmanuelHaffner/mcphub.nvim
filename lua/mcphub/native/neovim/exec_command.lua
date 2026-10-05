@@ -1,9 +1,24 @@
 --- The `execute_command` native tool. Kept apart from `terminal.lua`, which
 --- registers it, so the definition can be exercised without a running hub.
 local Path = require("plenary.path")
+local State = require("mcphub.state")
 local exec = require("mcphub.native.neovim.utils.exec")
 
 local M = {}
+
+--- User-facing configuration for `execute_command`, declared in
+--- `mcphub/config.lua` under `builtin_tools.execute_command`. Every field is
+--- optional and falls back to the runner's default.
+---
+---@class MCPHub.ExecuteCommandConfig
+---@field capture_bytes integer? Output kept in memory per stream; the rest is only in the log file
+
+--- Read at call time, because `State.config` is empty until mcphub's `setup()`
+--- runs.
+---@return MCPHub.ExecuteCommandConfig
+local function config()
+    return (State.config.builtin_tools or {}).execute_command or {}
+end
 
 ---@param job MCPHub.Exec.Job
 ---@return string
@@ -14,13 +29,16 @@ function M.format_result(job)
         "Exit Code: " .. tostring(job.exit_code) .. "\n",
     }
     if not job.stdout:is_empty() then
-        table.insert(parts, "Output:\n\n" .. job.stdout:text())
+        table.insert(parts, "Output:\n\n" .. job.stdout:text(job.log_path))
     end
     if not job.stderr:is_empty() then
-        table.insert(parts, "\nError Output:\n" .. job.stderr:text())
+        table.insert(parts, "\nError Output:\n" .. job.stderr:text(job.log_path))
     end
     if job.stdout:is_empty() and job.stderr:is_empty() then
         table.insert(parts, "Command completed with no output.")
+    end
+    if job.log_path and (job.stdout:truncated() or job.stderr:truncated()) then
+        table.insert(parts, "\nFull log: " .. job.log_path .. "\n")
     end
     return table.concat(parts)
 end
@@ -49,6 +67,7 @@ function M.handler(req, res)
     local _, err = exec.start({
         command = command,
         cwd = path:absolute(),
+        capture_bytes = config().capture_bytes,
         on_exit = function(job)
             res:text(M.format_result(job)):send()
         end,
