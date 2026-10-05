@@ -13,6 +13,10 @@ local M = {}
 ---@class MCPHub.ExecuteCommandConfig
 ---@field capture_bytes integer? Output kept in memory per stream; the rest is only in the log file
 ---@field kill_ladder MCPHub.Exec.KillStep[]? Signals sent to the process group before SIGKILL
+---@field timeout_default number? Seconds a command may run when the call passes no `timeout`
+---@field timeout_soft_limit number? Largest `timeout`, in seconds, that runs without the user's confirmation
+
+local DEFAULT_TIMEOUT, DEFAULT_SOFT_LIMIT = 30, 600
 
 --- Read at call time, because `State.config` is empty until mcphub's `setup()`
 --- runs.
@@ -21,14 +25,127 @@ local function config()
     return (State.config.builtin_tools or {}).execute_command or {}
 end
 
+---@return number default
+---@return number soft_limit
+local function timeouts()
+    local cfg = config()
+    return cfg.timeout_default or DEFAULT_TIMEOUT, cfg.timeout_soft_limit or DEFAULT_SOFT_LIMIT
+end
+
+---@param n number
+---@return string
+local function seconds(n)
+    return ("%g s"):format(n)
+end
+
+---@param n integer
+---@return string
+local function size(n)
+    for _, unit in ipairs({ { 1024 * 1024, "MiB" }, { 1024, "KiB" } }) do
+        if n >= unit[1] and n % unit[1] == 0 then
+            return ("%d %s"):format(n / unit[1], unit[2])
+        end
+    end
+    return ("%d bytes"):format(n)
+end
+
+--- The timeout a call runs under, in seconds. An absent `timeout` takes the
+--- configured default.
+---@param value any The call's `timeout` argument
+---@return number? seconds
+---@return string? err
+function M.resolve_timeout(value)
+    local default, soft = timeouts()
+    if value == nil or value == vim.NIL then
+        return default
+    end
+    if type(value) ~= "number" or value ~= value or value < 0 then
+        return nil, ("timeout must be a non-negative number of seconds, got %s"):format(vim.inspect(value))
+    end
+    if value == 0 or value > soft then
+        return nil,
+            ("%s requires the user's confirmation, which execute_command cannot request yet; pass a timeout of at most %s"):format(
+                value == 0 and "timeout = 0 (no timeout)" or ("timeout %s"):format(seconds(value)),
+                seconds(soft)
+            )
+    end
+    return value
+end
+
+---@return string
+function M.description()
+    local default, soft = timeouts()
+    local shell = exec.build_argv("")
+    shell[#shell] = nil
+    local signals = {}
+    for _, step in ipairs((exec.resolve_ladder(config().kill_ladder))) do
+        signals[#signals + 1] = step[1]:upper()
+    end
+    signals[#signals + 1] = "SIGKILL"
+    return table.concat({
+        ("Execute a shell command (`%s`) in `cwd` and return its exit code, stdout and stderr. The environment is inherited from Neovim."):format(
+            table.concat(shell, " ")
+        ),
+        "",
+        ("- `timeout` (optional, seconds): the command is terminated after this long. Default: %g. Values up to %g run without asking; larger values, or `0` for no timeout, require the user's confirmation — use them only when the command genuinely needs it."):format(
+            default,
+            soft
+        ),
+        ("- On timeout or cancellation the process group receives %s; the result says why the command stopped and includes the output captured so far."):format(
+            table.concat(signals, ", then ")
+        ),
+        ("- Output larger than %s per stream is elided in the middle; the result names a log file holding the full output."):format(
+            size(config().capture_bytes or exec.DEFAULT_CAPTURE_BYTES)
+        ),
+    }, "\n")
+end
+
+---@return table
+function M.input_schema()
+    local default, soft = timeouts()
+    return {
+        type = "object",
+        properties = {
+            command = {
+                type = "string",
+                description = "Shell command to execute",
+                examples = { [["ls -la"]] },
+            },
+            cwd = {
+                type = "string",
+                description = "Working directory for the command",
+                default = ".",
+            },
+            timeout = {
+                type = "number",
+                description = ("Seconds before the command is terminated. Default: %g. Up to %g runs without asking; larger values, or 0 for no timeout, need the user's confirmation."):format(
+                    default,
+                    soft
+                ),
+            },
+        },
+        required = { "command", "cwd" },
+    }
+end
+
 ---@param job MCPHub.Exec.Job
 ---@return string
 function M.format_result(job)
-    local parts = {
+    local parts = {}
+    if job.reason == "timeout" then
+        table.insert(
+            parts,
+            ("Timed out after %s and was terminated%s; pass a larger `timeout` if the command is expected to run longer.\n"):format(
+                seconds(job.timeout_ms / 1000),
+                job.last_signal and (" (%s)"):format(job.last_signal:upper()) or ""
+            )
+        )
+    end
+    vim.list_extend(parts, {
         "Command: " .. job.command .. "\n",
         "Working Directory: " .. job.cwd .. "\n",
         "Exit Code: " .. tostring(job.exit_code) .. "\n",
-    }
+    })
     if not job.stdout:is_empty() then
         table.insert(parts, "Output:\n\n" .. job.stdout:text(job.log_path))
     end
@@ -65,13 +182,24 @@ function M.handler(req, res)
         return res:error("Path is not a directory: " .. cwd)
     end
 
+    local timeout, timeout_err = M.resolve_timeout(req.params.timeout)
+    if not timeout then
+        return res:error(timeout_err)
+    end
+
     local _, err = exec.start({
         command = command,
         cwd = path:absolute(),
         capture_bytes = config().capture_bytes,
         kill_ladder = config().kill_ladder,
+        timeout_ms = math.max(1, math.floor(timeout * 1000 + 0.5)),
         on_exit = function(job)
-            res:text(M.format_result(job)):send()
+            local text = M.format_result(job)
+            if job.reason == "timeout" then
+                res:error(text)
+            else
+                res:text(text):send()
+            end
         end,
     })
     if err then
@@ -82,30 +210,8 @@ end
 ---@type MCPTool
 M.definition = {
     name = "execute_command",
-    description = [[Execute a shell command using vim.fn.jobstart and return the result.
-    
-Command Execution Guide:
-1. Commands run in a separate process
-2. Output is captured and returned when command completes
-3. Environment is inherited from Neovim
-4. Working directory must be specified]],
-
-    inputSchema = {
-        type = "object",
-        properties = {
-            command = {
-                type = "string",
-                description = "Shell command to execute",
-                examples = { [["ls -la"]] },
-            },
-            cwd = {
-                type = "string",
-                description = "Working directory for the command",
-                default = ".",
-            },
-        },
-        required = { "command", "cwd" },
-    },
+    description = M.description,
+    inputSchema = M.input_schema,
     handler = M.handler,
 }
 

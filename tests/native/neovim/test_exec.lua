@@ -14,7 +14,7 @@ local SEQ_2M = "seq -f %.0f 1 2000000"
 
 --- Start `command` in /tmp without waiting for it.
 ---@param command string
----@param opts? { capture_bytes?: integer, kill_ladder?: MCPHub.Exec.KillStep[] }
+---@param opts? { capture_bytes?: integer, kill_ladder?: MCPHub.Exec.KillStep[], timeout_ms?: integer }
 ---@return MCPHub.Exec.Job job
 ---@return fun(): MCPHub.Exec.Job? exited The job once `on_exit` has run
 local function spawn(command, opts)
@@ -24,6 +24,7 @@ local function spawn(command, opts)
         cwd = "/tmp",
         capture_bytes = opts and opts.capture_bytes,
         kill_ladder = opts and opts.kill_ladder,
+        timeout_ms = opts and opts.timeout_ms,
         on_exit = function(j)
             done = j
         end,
@@ -36,7 +37,7 @@ end
 
 --- Run `command` in /tmp and wait for it to exit.
 ---@param command string
----@param opts? { capture_bytes?: integer }
+---@param opts? { capture_bytes?: integer, timeout_ms?: integer }
 ---@return MCPHub.Exec.Job
 local function run(command, opts)
     local _, exited = spawn(command, opts)
@@ -188,6 +189,20 @@ T["lifecycle"]["reports the exit code"] = function()
     eq(job.exit_code, 3)
     eq(job.exited, true)
     eq(exec.get(job.id), nil)
+end
+
+T["lifecycle"]["terminates the job when its timeout fires"] = function()
+    local job = run("sleep 100", { timeout_ms = 200 })
+    eq(job.reason, "timeout")
+    eq(job.last_signal, "sigint")
+    eq(job.ended_at - job.started_at < 1000, true)
+end
+
+T["lifecycle"]["cancels the timeout when the job exits first"] = function()
+    local job = run("true", { timeout_ms = 200 })
+    eq(job._timer, nil)
+    vim.wait(300)
+    eq(job.reason, nil)
 end
 
 T["terminate"] = new_set()

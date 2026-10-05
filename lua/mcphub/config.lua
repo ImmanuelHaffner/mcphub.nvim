@@ -87,6 +87,8 @@ local defaults = {
         },
         ---@type MCPHub.ExecuteCommandConfig
         execute_command = {
+            timeout_default = 30, -- Seconds a command may run when the model passes no `timeout`
+            timeout_soft_limit = 600, -- Largest `timeout`, in seconds, that runs without asking you
             capture_bytes = 4 * 1024 * 1024, -- Output kept in memory per stream; the full output goes to a log file
             -- Signals sent to a command's process group before SIGKILL, which always follows: { signal, grace_ms }.
             -- Signals: sigint, sigterm, sighup; each grace within [100, 10000] ms, summing to at most 30000 ms.

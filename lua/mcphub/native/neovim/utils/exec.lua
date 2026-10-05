@@ -63,6 +63,21 @@ function M.validate_ladder(ladder)
     return true
 end
 
+--- The ladder `terminate` walks: `ladder` when it is valid, else the default.
+---@param ladder? MCPHub.Exec.KillStep[]
+---@return MCPHub.Exec.KillStep[] ladder
+---@return string? err Why `ladder` was rejected
+function M.resolve_ladder(ladder)
+    if ladder == nil then
+        return M.DEFAULT_KILL_LADDER
+    end
+    local ok, err = M.validate_ladder(ladder)
+    if not ok then
+        return M.DEFAULT_KILL_LADDER, err
+    end
+    return ladder
+end
+
 ---@class MCPHub.Exec.Capture
 ---@field half integer Byte budget of the head and of the tail; also the longest line kept
 ---@field prefix string Prepended to every line in the log
@@ -284,6 +299,8 @@ M.Capture = Capture
 ---@field terminating boolean `terminate` has run
 ---@field reason? MCPHub.Exec.TerminateReason Why `terminate` ran
 ---@field last_signal? string Last signal sent to the process group
+---@field timeout_ms? integer Timeout the job runs under; absent means none
+---@field _timer? uv.uv_timer_t Pending timeout
 
 ---@alias MCPHub.Exec.TerminateReason "timeout" | "cancelled" | "stopped" | "memory"
 
@@ -292,6 +309,7 @@ M.Capture = Capture
 ---@field cwd string Absolute working directory
 ---@field capture_bytes? integer Output kept in memory per stream
 ---@field kill_ladder? MCPHub.Exec.KillStep[] Soft steps of `terminate`; an invalid ladder falls back to the default
+---@field timeout_ms? integer Calls `terminate("timeout")` after this long; absent or 0 means no timeout
 ---@field on_exit? fun(job: MCPHub.Exec.Job) Called once, after all output has been captured
 
 --- Running jobs by `jobstart` id.
@@ -354,11 +372,9 @@ function Job:terminate(reason)
     self.terminating = true
     self.reason = reason
 
-    local ladder = self.kill_ladder or M.DEFAULT_KILL_LADDER
-    local ok, err = M.validate_ladder(ladder)
-    if not ok then
+    local ladder, err = M.resolve_ladder(self.kill_ladder)
+    if err then
         vim.notify("mcphub: invalid execute_command kill_ladder, using the default: " .. err, vim.log.levels.ERROR)
-        ladder = M.DEFAULT_KILL_LADDER
     end
     local steps = {}
     for _, step in ipairs(ladder) do
@@ -398,6 +414,7 @@ function M.start(opts)
         started_at = vim.uv.now(),
         exited = false,
         kill_ladder = opts.kill_ladder,
+        timeout_ms = opts.timeout_ms,
         terminating = false,
         stdout = Capture.new({ capture_bytes = opts.capture_bytes }),
         stderr = Capture.new({ capture_bytes = opts.capture_bytes, prefix = "[stderr] " }),
@@ -448,6 +465,11 @@ function M.start(opts)
             job.stderr:finish()
             flush()
             close_log()
+            if job._timer then
+                job._timer:stop()
+                job._timer:close()
+                job._timer = nil
+            end
             job.exit_code = code
             job.ended_at = vim.uv.now()
             job.exited = true
@@ -477,6 +499,16 @@ function M.start(opts)
     job.id = id
     job.pid = vim.fn.jobpid(id)
     M.jobs[id] = job
+    if opts.timeout_ms and opts.timeout_ms > 0 then
+        job._timer = vim.uv.new_timer()
+        job._timer:start(
+            opts.timeout_ms,
+            0,
+            vim.schedule_wrap(function()
+                job:terminate("timeout")
+            end)
+        )
+    end
     return job
 end
 
