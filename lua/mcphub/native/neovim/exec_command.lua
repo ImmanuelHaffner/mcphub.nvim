@@ -228,6 +228,8 @@ M.definition = {
     description = M.description,
     inputSchema = M.input_schema,
     confirm_if = M.confirm_if,
+    call_noun = "command",
+    cwd_param = "cwd",
     handler = M.handler,
 }
 

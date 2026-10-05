@@ -12,6 +12,8 @@ local log = require("mcphub.utils.log")
 ---@field handler fun(req: ToolRequest, res: ToolResponse): nil | table Tool handler function
 ---@field needs_confirmation_window? boolean Whether the tool requires a confirmation window before execution
 ---@field confirm_if? fun(args: table): string? Why a call must be confirmed by the user despite auto-approval
+---@field call_noun? string What the approval window's decline reasons call one call of this tool (default "call")
+---@field cwd_param? string The argument holding the working directory; offers the "Wrong cwd" decline reason
 
 ---@class MCPResource
 ---@field name? string Resource identifier

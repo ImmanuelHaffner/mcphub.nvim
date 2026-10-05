@@ -99,6 +99,23 @@ function M.parse_params(params, action_name)
     }
 end
 
+--- The definition of a native tool, or nil for anything else (remote tools, resources).
+---@param server_name string?
+---@param tool_name string?
+---@return MCPTool?
+local function find_native_tool(server_name, tool_name)
+    local server = server_name and native.is_native_server(server_name)
+    if not server then
+        return nil
+    end
+    for _, tool in ipairs(server.capabilities.tools) do
+        if tool.name == tool_name then
+            return tool
+        end
+    end
+    return nil
+end
+
 --- Why the call must be confirmed whatever the auto-approve settings say, if
 --- its native tool declares `confirm_if` and objects to these arguments.
 ---@param server_name string?
@@ -106,16 +123,137 @@ end
 ---@param arguments table
 ---@return string? reason
 function M.forced_confirmation_reason(server_name, tool_name, arguments)
-    local server = server_name and native.is_native_server(server_name)
-    if not server then
-        return nil
-    end
-    for _, tool in ipairs(server.capabilities.tools) do
-        if tool.name == tool_name then
-            return confirmation.reason(tool, arguments)
+    local tool = find_native_tool(server_name, tool_name)
+    return tool and confirmation.reason(tool, arguments) or nil
+end
+
+---@class MCPHub.DeclineContext
+---@field noun string The tool's `call_noun`, or "call"
+---@field tool table The native tool definition, or an empty table
+---@field arguments table
+---@field text? string Free text from an `input` reason
+
+---@class MCPHub.DeclineReason
+---@field id string
+---@field key string Hard-coded so muscle memory carries across tools; never reused
+---@field label string May contain one `%s` for the noun
+---@field input? boolean
+---@field requires? string A tool field the reason needs; without it the reason is not offered
+---@field message fun(ctx: MCPHub.DeclineContext): string What the LLM is told
+
+--- Reasons the user can give for declining a call, in display order.
+---@type MCPHub.DeclineReason[]
+M.DECLINE_REASONS = {
+    {
+        id = "wrong",
+        key = "w",
+        label = "Wrong %s",
+        message = function(ctx)
+            return ("The user says this %s is wrong. Reconsider it before retrying."):format(ctx.noun)
+        end,
+    },
+    {
+        id = "dont",
+        key = "d",
+        label = "Don't execute",
+        message = function(ctx)
+            return ("The user declined to run this %s. Do not retry it."):format(ctx.noun)
+        end,
+    },
+    {
+        id = "scope",
+        key = "s",
+        label = "Scope too broad",
+        message = function(ctx)
+            return ("The user says this %s's scope is too broad. Narrow it (paths, filters, limits) and retry."):format(
+                ctx.noun
+            )
+        end,
+    },
+    {
+        id = "cwd",
+        key = "x",
+        label = "Wrong cwd",
+        requires = "cwd_param",
+        message = function(ctx)
+            local param = ctx.tool.cwd_param
+            return ("The user says the working directory `%s` is wrong for this %s. Reconsider `%s` before retrying."):format(
+                tostring(ctx.arguments[param]),
+                ctx.noun,
+                param
+            )
+        end,
+    },
+    {
+        id = "ask",
+        key = "a",
+        label = "Ask first",
+        message = function(ctx)
+            return ("The user wants to know why this %s is needed. Explain your reasoning and wait for their go-ahead before retrying."):format(
+                ctx.noun
+            )
+        end,
+    },
+    {
+        id = "myself",
+        key = "m",
+        label = "I'll run it myself",
+        message = function(ctx)
+            return ("The user will run this %s themselves. Do not retry it; wait for them to report back."):format(
+                ctx.noun
+            )
+        end,
+    },
+    {
+        id = "other",
+        key = "o",
+        label = "Other…",
+        input = true,
+        message = function(ctx)
+            return "The user declined: " .. ctx.text
+        end,
+    },
+}
+
+---@param parsed_params MCPHub.ParsedParams
+---@return MCPHub.DeclineContext
+local function decline_context(parsed_params)
+    local tool = find_native_tool(parsed_params.server_name, parsed_params.tool_name) or {}
+    return { noun = tool.call_noun or "call", tool = tool, arguments = parsed_params.arguments or {} }
+end
+
+--- The decline choices the approval window offers for this call.
+---@param parsed_params MCPHub.ParsedParams
+---@return MCPHub.ConfirmChoice[]
+function M.decline_choices(parsed_params)
+    local ctx = decline_context(parsed_params)
+    local choices = {}
+    for _, reason in ipairs(M.DECLINE_REASONS) do
+        if not reason.requires or ctx.tool[reason.requires] then
+            table.insert(choices, {
+                key = reason.key,
+                id = reason.id,
+                input = reason.input,
+                label = reason.label:format(ctx.noun),
+            })
         end
     end
-    return nil
+    return choices
+end
+
+--- What the LLM is told when the user declines with `choice`.
+---@param choice MCPHub.ConfirmChoiceResult
+---@param parsed_params MCPHub.ParsedParams
+---@return string
+function M.decline_message(choice, parsed_params)
+    local ctx = decline_context(parsed_params)
+    ctx.text = choice.text
+    for _, reason in ipairs(M.DECLINE_REASONS) do
+        if reason.id == choice.id then
+            return reason.message(ctx)
+        end
+    end
+    return "User cancelled the operation"
 end
 
 --- For some built-in tools, we already show interactive diffs, before confirmation.
@@ -221,6 +359,7 @@ end
 ---@param params MCPHub.ParsedParams
 ---@return boolean confirmed
 ---@return boolean cancelled
+---@return MCPHub.ConfirmChoiceResult? choice The decline reason the user picked, if any
 function M.show_mcp_tool_prompt(params)
     local action_name = params.action
     local server_name = params.server_name
@@ -305,9 +444,10 @@ function M.show_mcp_tool_prompt(params)
         uri = uri,
         arguments = arguments,
     })
-    local confirmed, cancelled = require("mcphub.utils.ui").confirm(lines, {
+    local confirmed, cancelled, choice = require("mcphub.utils.ui").confirm(lines, {
         min_width = 70,
         max_width = 100,
+        choices = M.decline_choices(params),
     })
     -- Fire event after user makes decision
     utils.fire("MCPHubApprovalWindowClosed", {
@@ -320,7 +460,7 @@ function M.show_mcp_tool_prompt(params)
         cancelled = cancelled,
     })
 
-    return confirmed, cancelled
+    return confirmed, cancelled, choice
 end
 
 ---@param parsed_params MCPHub.ParsedParams
@@ -353,9 +493,12 @@ function M.handle_auto_approval_decision(parsed_params)
     end
 
     if parsed_params.forced_reason or (status.approve == false and parsed_params.needs_confirmation_window) then
-        local confirmed, _ = M.show_mcp_tool_prompt(parsed_params)
+        local confirmed, _, choice = M.show_mcp_tool_prompt(parsed_params)
         if confirmed and parsed_params.forced_reason then
             confirmation.grant(parsed_params.arguments)
+        end
+        if choice then
+            return { error = M.decline_message(choice, parsed_params), approve = false }
         end
         return { error = not confirmed and "User cancelled the operation", approve = confirmed }
     end

@@ -244,12 +244,75 @@ function M.get_selection(bufnr)
     }
 end
 
+--- Keys `M.confirm` binds itself; a choice key may not collide with them in
+--- either case, since choice keys are mapped in both.
+M.CONFIRM_RESERVED_KEYS = { "y", "n", "c", "q", "<Esc>", "<CR>", "<Tab>" }
+
+---@class MCPHub.ConfirmChoice
+---@field key string Mapped in both cases
+---@field label string
+---@field id string Returned to the caller when chosen
+---@field input? boolean Ask for free text first; the result then carries `text`
+
+---@class MCPHub.ConfirmChoiceResult
+---@field id string
+---@field text? string
+
+---@param choices MCPHub.ConfirmChoice[]
+local function validate_choices(choices)
+    local taken = {}
+    for _, key in ipairs(M.CONFIRM_RESERVED_KEYS) do
+        taken[key:lower()] = true
+    end
+    for _, choice in ipairs(choices) do
+        local key = choice.key:lower()
+        assert(not taken[key], ("confirm: choice key %q collides with another key"):format(choice.key))
+        taken[key] = true
+    end
+end
+
+--- Lay the choices out as `Decline: [k] Label  [k] Label …`, breaking only
+--- between entries so that no line exceeds `width` display cells.
+---@param choices MCPHub.ConfirmChoice[]
+---@param width integer
+---@return NuiLine[]
+local function choice_lines(choices, width)
+    local prefix = "Decline: "
+    local lines = {}
+    local line = NuiLine()
+    line:append(prefix, Text.highlights.muted)
+    local used, empty = #prefix, true
+    for _, choice in ipairs(choices) do
+        local key, label = "[" .. choice.key .. "]", " " .. choice.label
+        local entry_width = vim.fn.strdisplaywidth(key .. label)
+        if not empty and used + 2 + entry_width > width then
+            table.insert(lines, line)
+            line = NuiLine()
+            line:append(string.rep(" ", #prefix))
+            used, empty = #prefix, true
+        end
+        if not empty then
+            line:append("  ")
+            used = used + 2
+        end
+        line:append(key, Text.highlights.keymap)
+        line:append(label, Text.highlights.text)
+        used, empty = used + entry_width, false
+    end
+    table.insert(lines, line)
+    return lines
+end
+
 ---Create a confirmation window with Yes/No/Cancel options
 ---@param message string | string[] | NuiLine[] Message to display
----@param opts? {relative_to_chat?: boolean, min_width?: number, max_width?: number}
----@return boolean, boolean -- (confirmed, cancelled)
+---@param opts? {relative_to_chat?: boolean, min_width?: number, max_width?: number, choices?: MCPHub.ConfirmChoice[]}
+---@return boolean confirmed
+---@return boolean cancelled
+---@return MCPHub.ConfirmChoiceResult? choice The choice that declined, if any
 function M.confirm(message, opts)
     opts = opts or {}
+    local choices = opts.choices or {}
+    validate_choices(choices)
 
     local result = async.wrap(function(callback)
         if not message or #message == 0 then
@@ -328,6 +391,12 @@ function M.confirm(message, opts)
 
         -- Add padding and ensure reasonable bounds
         local width = math.max(min_width, math.min(max_width, content_width + 8))
+
+        if #choices > 0 then
+            table.insert(lines, NuiLine():append(""))
+            vim.list_extend(lines, choice_lines(choices, width - 2 * Text.HORIZONTAL_PADDING))
+        end
+
         local height = math.min(#lines + 3, math.floor(vim.o.lines * 0.6)) -- +3 for padding and title
 
         -- Determine positioning - top center of editor
@@ -391,7 +460,7 @@ function M.confirm(message, opts)
         local is_closed = false
 
         -- Enhanced close function with cleanup
-        local function close_window(confirmed, cancelled)
+        local function close_window(confirmed, cancelled, choice)
             if is_closed then
                 return
             end
@@ -405,8 +474,28 @@ function M.confirm(message, opts)
                 if vim.api.nvim_buf_is_valid(bufnr) then
                     vim.api.nvim_buf_delete(bufnr, { force = true })
                 end
-                callback(confirmed, cancelled)
+                callback(confirmed, cancelled, choice)
             end)
+        end
+
+        ---@param choice MCPHub.ConfirmChoice
+        local function choose(choice)
+            if not choice.input then
+                return close_window(false, false, { id = choice.id })
+            end
+            -- No text means no decision: go back to the window rather than decline.
+            local function back()
+                if vim.api.nvim_win_is_valid(win) then
+                    vim.api.nvim_set_current_win(win)
+                    vim.cmd("stopinsert")
+                end
+            end
+            M.multiline_input(choice.label, "", function(text)
+                if text == "" then
+                    return back()
+                end
+                close_window(false, false, { id = choice.id, text = text })
+            end, { on_cancel = back })
         end
 
         -- Function to execute active option
@@ -460,6 +549,14 @@ function M.confirm(message, opts)
                 update_footer(win)
             end,
         }
+
+        for _, choice in ipairs(choices) do
+            local function handler()
+                choose(choice)
+            end
+            keymaps[choice.key:lower()] = handler
+            keymaps[choice.key:upper()] = handler
+        end
 
         for key, handler in pairs(keymaps) do
             vim.keymap.set("n", key, handler, {

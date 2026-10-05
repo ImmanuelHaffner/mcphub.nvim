@@ -19,8 +19,8 @@ local real = {}
 ---@type { forced_reason?: string }[]
 local prompts
 
---- Answer of the stubbed approval window.
-local answer
+--- Answer of the stubbed approval window, and the decline reason it returns.
+local answer, choice
 
 --- Serve `tool` as the only tool of the native server "fake".
 ---@param tool table
@@ -82,13 +82,13 @@ local T = new_set({
             real.auto_approve = State.config.auto_approve
             real.builtin_tools = State.config.builtin_tools
             State.config.builtin_tools = nil
-            prompts, answer = {}, true
+            prompts, answer, choice = {}, true, nil
             shared.is_auto_approved_in_server = function()
                 return false
             end
             shared.show_mcp_tool_prompt = function(params)
                 table.insert(prompts, { forced_reason = params.forced_reason })
-                return answer, false
+                return answer, false, choice
             end
             serve(exec_command.definition)
         end,
@@ -156,6 +156,86 @@ T["gate"]["a throwing confirm_if forces confirmation"] = function()
     shared.handle_auto_approval_decision(parse({}))
     eq(#prompts, 1)
     eq(vim.startswith(prompts[1].forced_reason, "confirm_if failed"), true)
+end
+
+T["decline reasons"] = new_set()
+
+T["decline reasons"]["keys are unique and avoid the window's own"] = function()
+    local taken = {}
+    for _, key in ipairs(require("mcphub.utils.ui").CONFIRM_RESERVED_KEYS) do
+        taken[key:lower()] = "reserved"
+    end
+    for _, reason in ipairs(shared.DECLINE_REASONS) do
+        eq({ reason.id, taken[reason.key:lower()] }, { reason.id, nil })
+        taken[reason.key:lower()] = reason.id
+    end
+end
+
+---@param decision_choice MCPHub.ConfirmChoiceResult
+---@return string
+local function declined_with(decision_choice)
+    answer, choice = false, decision_choice
+    local decision = shared.handle_auto_approval_decision(parse({ command = "ls", cwd = "/tmp" }))
+    eq(decision.approve, false)
+    return decision.error
+end
+
+T["decline reasons"]["each reason's message reaches the LLM"] = function()
+    eq(declined_with({ id = "wrong" }), "The user says this command is wrong. Reconsider it before retrying.")
+    eq(declined_with({ id = "dont" }), "The user declined to run this command. Do not retry it.")
+    eq(declined_with({ id = "scope" }):find("this command's scope is too broad", 1, true) ~= nil, true)
+    eq(
+        declined_with({ id = "cwd" }),
+        "The user says the working directory `/tmp` is wrong for this command. Reconsider `cwd` before retrying."
+    )
+    eq(declined_with({ id = "ask" }):find("why this command is needed", 1, true) ~= nil, true)
+    eq(declined_with({ id = "myself" }):find("will run this command themselves", 1, true) ~= nil, true)
+    eq(declined_with({ id = "other", text = "use git mv instead" }), "The user declined: use git mv instead")
+    eq(#prompts, 7)
+end
+
+T["decline reasons"]["other tools are a call"] = function()
+    serve({ name = "execute_command", handler = function() end })
+    eq(declined_with({ id = "wrong" }), "The user says this call is wrong. Reconsider it before retrying.")
+end
+
+---@param parsed MCPHub.ParsedParams
+---@return table<string, string> labels by id
+local function offered(parsed)
+    local labels = {}
+    for _, c in ipairs(shared.decline_choices(parsed)) do
+        labels[c.id] = c.label
+    end
+    return labels
+end
+
+T["decline reasons"]["Wrong cwd only for tools that declare cwd_param"] = function()
+    local labels = offered(parse({ command = "ls", cwd = "/tmp" }))
+    eq(labels.cwd, "Wrong cwd")
+    eq(labels.wrong, "Wrong command")
+
+    serve({ name = "execute_command", handler = function() end })
+    labels = offered(parse({ command = "ls", cwd = "/tmp" }))
+    eq(labels.cwd, nil)
+    eq(labels.wrong, "Wrong call")
+    eq(vim.tbl_count(labels), #shared.DECLINE_REASONS - 1)
+end
+
+T["decline reasons"]["the approval window offers them"] = function()
+    shared.show_mcp_tool_prompt = real.show_mcp_tool_prompt
+    local ui = require("mcphub.utils.ui")
+    local confirm = ui.confirm
+    local seen
+    ui.confirm = function(_, opts)
+        seen = opts.choices
+        return false, false, { id = "dont" }
+    end
+    local ok, err = pcall(function()
+        eq(declined_with({ id = "dont" }), "The user declined to run this command. Do not retry it.")
+    end)
+    ui.confirm = confirm
+    assert(ok, err)
+    eq(seen, shared.decline_choices(parse({ command = "ls", cwd = "/tmp" })))
 end
 
 T["enforcement"] = new_set()
