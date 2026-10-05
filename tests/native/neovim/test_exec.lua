@@ -12,29 +12,65 @@ local MiB = 1024 * 1024
 -- BSD `seq` formats with `%g`, so a bare `seq 1 2000000` ends in `2e+06`, twice.
 local SEQ_2M = "seq -f %.0f 1 2000000"
 
---- Run `command` in /tmp and wait for it to exit.
+--- Start `command` in /tmp without waiting for it.
 ---@param command string
----@param opts? { capture_bytes?: integer }
----@return MCPHub.Exec.Job
-local function run(command, opts)
+---@param opts? { capture_bytes?: integer, kill_ladder?: MCPHub.Exec.KillStep[] }
+---@return MCPHub.Exec.Job job
+---@return fun(): MCPHub.Exec.Job? exited The job once `on_exit` has run
+local function spawn(command, opts)
     local done
     local job, err = exec.start({
         command = command,
         cwd = "/tmp",
         capture_bytes = opts and opts.capture_bytes,
+        kill_ladder = opts and opts.kill_ladder,
         on_exit = function(j)
             done = j
         end,
     })
     assert(job, err)
+    return job, function()
+        return done
+    end
+end
+
+--- Run `command` in /tmp and wait for it to exit.
+---@param command string
+---@param opts? { capture_bytes?: integer }
+---@return MCPHub.Exec.Job
+local function run(command, opts)
+    local _, exited = spawn(command, opts)
     assert(
         vim.wait(60000, function()
-            return done ~= nil
+            return exited() ~= nil
         end, 10),
         "command did not exit: " .. command
     )
-    return done
+    return assert(exited())
 end
+
+--- Wait until the job printed its first line, which the commands below do
+--- once their traps are installed and their children are running.
+---@param job MCPHub.Exec.Job
+local function wait_ready(job)
+    assert(
+        vim.wait(5000, function()
+            return job.stdout.line_count > 0
+        end, 10),
+        "command never became ready: " .. job.command
+    )
+end
+
+---@param pattern string
+---@return boolean
+local function pgrep(pattern)
+    -- An argv list, so no shell whose own command line would match.
+    vim.fn.system({ "pgrep", "-f", pattern })
+    return vim.v.shell_error == 0
+end
+
+---@type MCPHub.Exec.KillStep[]
+local SHORT_LADDER = { { "sigint", 200 }, { "sigterm", 200 } }
 
 ---@param s string
 ---@param needle string
@@ -51,6 +87,9 @@ local T = new_set({
             spill.DIR = vim.fn.tempname()
         end,
         post_case = function()
+            for _, job in pairs(exec.jobs) do
+                pcall(vim.uv.kill, -job.pid, "sigkill")
+            end
             vim.fn.delete(spill.DIR, "rf")
             spill.DIR = real_dir
         end,
@@ -149,6 +188,155 @@ T["lifecycle"]["reports the exit code"] = function()
     eq(job.exit_code, 3)
     eq(job.exited, true)
     eq(exec.get(job.id), nil)
+end
+
+T["terminate"] = new_set()
+
+T["terminate"]["ends a cooperative process with SIGINT"] = function()
+    local job, exited =
+        spawn([[trap 'kill $!; exit 0' INT; sleep 100 & echo ready; wait]], { kill_ladder = SHORT_LADDER })
+    wait_ready(job)
+    local t0 = vim.uv.now()
+    job:terminate("cancelled")
+    eq(
+        vim.wait(300, function()
+            return exited() ~= nil
+        end, 10),
+        true
+    )
+    eq(job.exit_code, 0)
+    eq(job.reason, "cancelled")
+    eq(job.last_signal, "sigint")
+    eq(vim.uv.now() - t0 < 300, true)
+    -- The group emptied, so the ladder stopped there.
+    vim.wait(300)
+    eq(job.last_signal, "sigint")
+end
+
+T["terminate"]["escalates to SIGKILL"] = function()
+    local job, exited = spawn([[trap '' INT TERM; echo ready; sleep 100]], { kill_ladder = SHORT_LADDER })
+    wait_ready(job)
+    job:terminate("timeout")
+    eq(
+        vim.wait(700, function()
+            return exited() ~= nil
+        end, 10),
+        true
+    )
+    eq(job.last_signal, "sigkill")
+end
+
+T["terminate"]["kills the whole process group"] = function()
+    local job, exited = spawn([[echo ready; sleep 101 | cat]], { kill_ladder = SHORT_LADDER })
+    wait_ready(job)
+    eq(pgrep("sleep 101"), true)
+    job:terminate("stopped")
+    vim.wait(1000, function()
+        return exited() ~= nil
+    end, 10)
+    eq(pgrep("sleep 101"), false)
+end
+
+T["terminate"]["keeps escalating while the group outlives the leader"] = function()
+    -- A non-interactive shell starts `sleep &` with SIGINT ignored, so SIGINT
+    -- ends the shell and leaves the sleep running.
+    local job, exited = spawn([[trap 'exit 0' INT; sleep 102 & echo ready; wait]], { kill_ladder = SHORT_LADDER })
+    wait_ready(job)
+    job:terminate("cancelled")
+    eq(
+        vim.wait(300, function()
+            return exited() ~= nil
+        end, 10),
+        true
+    )
+    eq(
+        vim.wait(700, function()
+            return not pgrep("sleep 102")
+        end, 50),
+        true
+    )
+    eq(job.last_signal, "sigterm")
+end
+
+T["terminate"]["is idempotent"] = function()
+    local job, exited = spawn([[trap '' INT TERM; echo ready; sleep 100]], { kill_ladder = SHORT_LADDER })
+    wait_ready(job)
+    local seen = {}
+    local function observe()
+        if job.last_signal and seen[#seen] ~= job.last_signal then
+            seen[#seen + 1] = job.last_signal
+        end
+        return exited() ~= nil
+    end
+    local t0 = vim.uv.now()
+    job:terminate("timeout")
+    vim.wait(100, observe, 5)
+    job:terminate("cancelled")
+    eq(vim.wait(1000, observe, 5), true)
+    eq(seen, { "sigint", "sigterm", "sigkill" })
+    eq(job.reason, "timeout")
+    -- A restarted ladder would take at least 100 + 400 ms.
+    eq(vim.uv.now() - t0 < 500, true)
+end
+
+T["terminate"]["falls back to the default ladder when the configured one is invalid"] = function()
+    local default, notify = exec.DEFAULT_KILL_LADDER, vim.notify
+    local notified
+    exec.DEFAULT_KILL_LADDER = { { "sigint", 100 } }
+    vim.notify = function(msg, level)
+        notified = { msg, level }
+    end
+    local ok, err = pcall(function()
+        local job, exited = spawn([[trap '' INT TERM; echo ready; sleep 100]], { kill_ladder = { { "sigkill", 100 } } })
+        wait_ready(job)
+        job:terminate("timeout")
+        eq(
+            vim.wait(1000, function()
+                return exited() ~= nil
+            end, 10),
+            true
+        )
+        eq(job.last_signal, "sigkill")
+    end)
+    exec.DEFAULT_KILL_LADDER, vim.notify = default, notify
+    assert(ok, err)
+    eq(notified[2], vim.log.levels.ERROR)
+    eq(contains(notified[1], "sigkill"), true)
+end
+
+T["validate_ladder"] = new_set()
+
+T["validate_ladder"]["accepts the default and any case"] = function()
+    eq(exec.validate_ladder(exec.DEFAULT_KILL_LADDER), true)
+    eq(exec.validate_ladder({ { "SIGHUP", 100 } }), true)
+    eq(exec.validate_ladder({}), true)
+end
+
+T["validate_ladder"]["rejects SIGKILL"] = function()
+    local ok, err = exec.validate_ladder({ { "sigkill", 100 } })
+    eq(ok, false)
+    eq(contains(assert(err), "sigkill"), true)
+end
+
+T["validate_ladder"]["bounds each grace"] = function()
+    eq(exec.validate_ladder({ { "sigint", 99 } }), false)
+    eq(exec.validate_ladder({ { "sigint", 10001 } }), false)
+    eq(exec.validate_ladder({ { "sigint" } }), false)
+end
+
+T["validate_ladder"]["caps the total grace"] = function()
+    eq(exec.validate_ladder({ { "sigint", 10000 }, { "sigterm", 10000 }, { "sighup", 10000 } }), true)
+    eq(exec.validate_ladder({ { "sigint", 10000 }, { "sigterm", 10000 }, { "sighup", 10001 } }), false)
+    local ok, err =
+        exec.validate_ladder({ { "sigint", 10000 }, { "sigterm", 10000 }, { "sighup", 10000 }, { "sigint", 100 } })
+    eq(ok, false)
+    eq(contains(assert(err), "30000"), true)
+end
+
+T["validate_ladder"]["rejects malformed ladders"] = function()
+    eq(exec.validate_ladder("sigint"), false)
+    eq(exec.validate_ladder({ sigint = 100 }), false)
+    eq(exec.validate_ladder({ "sigint" }), false)
 end
 
 return T

@@ -12,6 +12,7 @@ local M = {}
 ---
 ---@class MCPHub.ExecuteCommandConfig
 ---@field capture_bytes integer? Output kept in memory per stream; the rest is only in the log file
+---@field kill_ladder MCPHub.Exec.KillStep[]? Signals sent to the process group before SIGKILL
 
 --- Read at call time, because `State.config` is empty until mcphub's `setup()`
 --- runs.
@@ -68,6 +69,7 @@ function M.handler(req, res)
         command = command,
         cwd = path:absolute(),
         capture_bytes = config().capture_bytes,
+        kill_ladder = config().kill_ladder,
         on_exit = function(job)
             res:text(M.format_result(job)):send()
         end,

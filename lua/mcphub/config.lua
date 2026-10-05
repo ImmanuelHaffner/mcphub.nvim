@@ -88,6 +88,9 @@ local defaults = {
         ---@type MCPHub.ExecuteCommandConfig
         execute_command = {
             capture_bytes = 4 * 1024 * 1024, -- Output kept in memory per stream; the full output goes to a log file
+            -- Signals sent to a command's process group before SIGKILL, which always follows: { signal, grace_ms }.
+            -- Signals: sigint, sigterm, sighup; each grace within [100, 10000] ms, summing to at most 30000 ms.
+            kill_ladder = { { "sigint", 2000 }, { "sigterm", 3000 } },
         },
     },
     --- Custom function to parse json file (e.g `require'json5'.parse` from `https://github.com/Joakker/lua-json5 to parse json5 syntax for .vscode/mcp.json like files)
