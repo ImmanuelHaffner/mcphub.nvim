@@ -144,9 +144,19 @@ function M.input_schema()
 end
 
 ---@param job MCPHub.Exec.Job
+---@param clamped_from? number The `timeout` the call asked for before the user clamped it
 ---@return string
-function M.format_result(job)
+function M.format_result(job, clamped_from)
     local parts = {}
+    if clamped_from then
+        table.insert(
+            parts,
+            ("Ran with `timeout = %g` s; the user clamped it from %s.\n"):format(
+                job.timeout_ms / 1000,
+                clamped_from == 0 and "`timeout = 0` (no timeout)" or seconds(clamped_from)
+            )
+        )
+    end
     if job.reason == "timeout" then
         table.insert(
             parts,
@@ -181,6 +191,12 @@ end
 function M.handler(req, res)
     local command = req.params.command
     local cwd = req.params.cwd
+    -- Set by the approval gate when the user chose to run with the soft limit.
+    local clamped_from = req.params._clamped_from
+    req.params._clamped_from = nil
+    if type(clamped_from) ~= "number" then
+        clamped_from = nil
+    end
 
     if not command or command == "" then
         return res:error("command field is required and cannot be empty.")
@@ -209,7 +225,7 @@ function M.handler(req, res)
         kill_ladder = config().kill_ladder,
         timeout_ms = timeout > 0 and math.max(1, math.min(math.floor(timeout * 1000 + 0.5), MAX_TIMER_MS)) or nil,
         on_exit = function(job)
-            local text = M.format_result(job)
+            local text = M.format_result(job, clamped_from)
             if job.reason == "timeout" then
                 res:error(text)
             else
@@ -230,6 +246,11 @@ M.definition = {
     confirm_if = M.confirm_if,
     call_noun = "command",
     cwd_param = "cwd",
+    timeout_param = "timeout",
+    timeout_soft_limit = function()
+        local _, soft = timeouts()
+        return soft
+    end,
     handler = M.handler,
 }
 

@@ -14,6 +14,8 @@ local log = require("mcphub.utils.log")
 ---@field confirm_if? fun(args: table): string? Why a call must be confirmed by the user despite auto-approval
 ---@field call_noun? string What the approval window's decline reasons call one call of this tool (default "call")
 ---@field cwd_param? string The argument holding the working directory; offers the "Wrong cwd" decline reason
+---@field timeout_param? string The argument holding mcphub's own timeout; offers "Timeout too high" when the call passes it
+---@field timeout_soft_limit? fun(): number Largest `timeout_param` that runs unconfirmed; above it, or at 0, offers "Run with"
 
 ---@class MCPResource
 ---@field name? string Resource identifier

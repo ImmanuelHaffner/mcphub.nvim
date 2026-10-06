@@ -126,6 +126,20 @@ T["timeout"]["confirm_if names exemptions only"] = function()
     end
 end
 
+T["timeout"]["reports a clamp by the user"] = function()
+    local text = call({ command = "echo hi", cwd = "/tmp", timeout = 600, _clamped_from = 1800 }).content[1].text
+    eq(
+        text,
+        "Ran with `timeout = 600` s; the user clamped it from 1800 s.\nCommand: echo hi\nWorking Directory: /tmp\nExit Code: 0\nOutput:\n\nhi\n"
+    )
+
+    text = call({ command = "true", cwd = "/tmp", timeout = 600, _clamped_from = 0 }).content[1].text
+    eq(vim.startswith(text, "Ran with `timeout = 600` s; the user clamped it from `timeout = 0` (no timeout).\n"), true)
+
+    text = call({ command = "true", cwd = "/tmp", timeout = 600 }).content[1].text
+    eq(text:find("clamped", 1, true), nil)
+end
+
 T["timeout"]["keeps the output captured so far"] = function()
     local result = call({ command = "echo before; sleep 100", cwd = "/tmp", timeout = 1 })
     eq(result.isError, true)

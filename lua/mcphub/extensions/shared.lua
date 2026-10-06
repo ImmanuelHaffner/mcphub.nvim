@@ -131,15 +131,25 @@ end
 ---@field noun string The tool's `call_noun`, or "call"
 ---@field tool table The native tool definition, or an empty table
 ---@field arguments table
+---@field timeout? any The call's `timeout_param` argument, nil when absent
+---@field soft_limit? number The tool's `timeout_soft_limit()`
 ---@field text? string Free text from an `input` reason
 
 ---@class MCPHub.DeclineReason
 ---@field id string
 ---@field key string Hard-coded so muscle memory carries across tools; never reused
----@field label string May contain one `%s` for the noun
+---@field label string|fun(ctx: MCPHub.DeclineContext): string A string may contain one `%s` for the noun
 ---@field input? boolean
----@field requires? string A tool field the reason needs; without it the reason is not offered
----@field message fun(ctx: MCPHub.DeclineContext): string What the LLM is told
+---@field requires? string A condition from `CONDITIONS`, or else a tool field; without it the reason is not offered
+---@field message? fun(ctx: MCPHub.DeclineContext): string What the LLM is told when the reason declines
+---@field approves? boolean The reason approves the call, with `arguments(ctx)` instead of the call's
+---@field arguments? fun(ctx: MCPHub.DeclineContext): table
+
+---@param v any
+---@return string
+local function quote_number(v)
+    return type(v) == "number" and ("%g"):format(v) or vim.inspect(v)
+end
 
 --- Reasons the user can give for declining a call, in display order.
 ---@type MCPHub.DeclineReason[]
@@ -205,6 +215,38 @@ M.DECLINE_REASONS = {
         end,
     },
     {
+        id = "timeout",
+        key = "t",
+        label = "Timeout too high",
+        requires = "timeout_given",
+        message = function(ctx)
+            local param = ctx.tool.timeout_param
+            return ("The user declined `%s = %s` s%s. Retry with a lower `%s`, or narrow or split the %s."):format(
+                param,
+                quote_number(ctx.timeout),
+                ctx.soft_limit and (" (soft limit %g s)"):format(ctx.soft_limit) or "",
+                param,
+                ctx.noun
+            )
+        end,
+    },
+    {
+        id = "clamp",
+        key = "r",
+        label = function(ctx)
+            return ("Run with %g s"):format(ctx.soft_limit)
+        end,
+        requires = "over_soft_limit",
+        approves = true,
+        arguments = function(ctx)
+            return vim.tbl_extend(
+                "force",
+                ctx.arguments,
+                { [ctx.tool.timeout_param] = ctx.soft_limit, _clamped_from = ctx.timeout }
+            )
+        end,
+    },
+    {
         id = "other",
         key = "o",
         label = "Other…",
@@ -215,11 +257,56 @@ M.DECLINE_REASONS = {
     },
 }
 
+--- Conditions a reason can require that depend on the call, not only on the
+--- tool's declarations. A `requires` not listed here names a tool field.
+---@type table<string, fun(ctx: MCPHub.DeclineContext): boolean>
+local CONDITIONS = {
+    timeout_given = function(ctx)
+        return ctx.timeout ~= nil
+    end,
+    over_soft_limit = function(ctx)
+        local t = ctx.timeout
+        return type(t) == "number" and ctx.soft_limit ~= nil and (t == 0 or t > ctx.soft_limit)
+    end,
+}
+
+---@param id string
+---@return MCPHub.DeclineReason?
+local function find_reason(id)
+    for _, reason in ipairs(M.DECLINE_REASONS) do
+        if reason.id == id then
+            return reason
+        end
+    end
+end
+
 ---@param parsed_params MCPHub.ParsedParams
 ---@return MCPHub.DeclineContext
 local function decline_context(parsed_params)
     local tool = find_native_tool(parsed_params.server_name, parsed_params.tool_name) or {}
-    return { noun = tool.call_noun or "call", tool = tool, arguments = parsed_params.arguments or {} }
+    local arguments = parsed_params.arguments or {}
+    local timeout = tool.timeout_param and arguments[tool.timeout_param]
+    return {
+        noun = tool.call_noun or "call",
+        tool = tool,
+        arguments = arguments,
+        timeout = timeout ~= vim.NIL and timeout or nil,
+        soft_limit = tool.timeout_soft_limit and tool.timeout_soft_limit(),
+    }
+end
+
+---@param reason MCPHub.DeclineReason
+---@param ctx MCPHub.DeclineContext
+---@return boolean
+local function offered(reason, ctx)
+    if not reason.requires then
+        return true
+    end
+    local condition = CONDITIONS[reason.requires]
+    if condition then
+        return condition(ctx)
+    end
+    return ctx.tool[reason.requires] ~= nil
 end
 
 --- The decline choices the approval window offers for this call.
@@ -229,12 +316,12 @@ function M.decline_choices(parsed_params)
     local ctx = decline_context(parsed_params)
     local choices = {}
     for _, reason in ipairs(M.DECLINE_REASONS) do
-        if not reason.requires or ctx.tool[reason.requires] then
+        if offered(reason, ctx) then
             table.insert(choices, {
                 key = reason.key,
                 id = reason.id,
                 input = reason.input,
-                label = reason.label:format(ctx.noun),
+                label = type(reason.label) == "function" and reason.label(ctx) or reason.label:format(ctx.noun),
             })
         end
     end
@@ -246,14 +333,13 @@ end
 ---@param parsed_params MCPHub.ParsedParams
 ---@return string
 function M.decline_message(choice, parsed_params)
+    local reason = find_reason(choice.id)
+    if not reason or not reason.message then
+        return "User cancelled the operation"
+    end
     local ctx = decline_context(parsed_params)
     ctx.text = choice.text
-    for _, reason in ipairs(M.DECLINE_REASONS) do
-        if reason.id == choice.id then
-            return reason.message(ctx)
-        end
-    end
-    return "User cancelled the operation"
+    return reason.message(ctx)
 end
 
 --- For some built-in tools, we already show interactive diffs, before confirmation.
@@ -464,7 +550,7 @@ function M.show_mcp_tool_prompt(params)
 end
 
 ---@param parsed_params MCPHub.ParsedParams
----@return {error?:string, approve:boolean}
+---@return {error?:string, approve:boolean, arguments?:table} decision `arguments` replaces the call's when set
 function M.handle_auto_approval_decision(parsed_params)
     local auto_approve = State.config.auto_approve or false
     local status = { approve = false, error = nil }
@@ -498,6 +584,10 @@ function M.handle_auto_approval_decision(parsed_params)
             confirmation.grant(parsed_params.arguments)
         end
         if choice then
+            local reason = find_reason(choice.id)
+            if reason and reason.approves then
+                return { approve = true, arguments = reason.arguments(decline_context(parsed_params)) }
+            end
             return { error = M.decline_message(choice, parsed_params), approve = false }
         end
         return { error = not confirmed and "User cancelled the operation", approve = confirmed }

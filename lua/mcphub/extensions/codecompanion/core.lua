@@ -65,7 +65,8 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
                 end,
             })
         elseif parsed_params.action == "use_mcp_tool" then
-            hub:call_tool(parsed_params.server_name, parsed_params.tool_name, parsed_params.arguments, {
+            local arguments = result.arguments or parsed_params.arguments
+            hub:call_tool(parsed_params.server_name, parsed_params.tool_name, arguments, {
                 caller = {
                     type = "codecompanion",
                     codecompanion = tools,

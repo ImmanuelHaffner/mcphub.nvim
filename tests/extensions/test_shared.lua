@@ -172,10 +172,11 @@ T["decline reasons"]["keys are unique and avoid the window's own"] = function()
 end
 
 ---@param decision_choice MCPHub.ConfirmChoiceResult
+---@param arguments? table Defaults to an `ls` in /tmp
 ---@return string
-local function declined_with(decision_choice)
+local function declined_with(decision_choice, arguments)
     answer, choice = false, decision_choice
-    local decision = shared.handle_auto_approval_decision(parse({ command = "ls", cwd = "/tmp" }))
+    local decision = shared.handle_auto_approval_decision(parse(arguments or { command = "ls", cwd = "/tmp" }))
     eq(decision.approve, false)
     return decision.error
 end
@@ -218,7 +219,52 @@ T["decline reasons"]["Wrong cwd only for tools that declare cwd_param"] = functi
     labels = offered(parse({ command = "ls", cwd = "/tmp" }))
     eq(labels.cwd, nil)
     eq(labels.wrong, "Wrong call")
-    eq(vim.tbl_count(labels), #shared.DECLINE_REASONS - 1)
+    -- Neither timeout reason is offered without a `timeout` argument.
+    eq(vim.tbl_count(labels), #shared.DECLINE_REASONS - 3)
+end
+
+T["decline reasons"]["Timeout too high only when the call passes a timeout"] = function()
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = 1800 })).timeout, "Timeout too high")
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = 60 })).timeout, "Timeout too high")
+    eq(offered(parse({ command = "ls", cwd = "/tmp" })).timeout, nil)
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = vim.NIL })).timeout, nil)
+
+    serve({ name = "execute_command", handler = function() end })
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = 1800 })).timeout, nil)
+end
+
+T["decline reasons"]["Run with the soft limit only beyond it"] = function()
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = 601 })).clamp, "Run with 600 s")
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = 0 })).clamp, "Run with 600 s")
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = 600 })).clamp, nil)
+    eq(offered(parse({ command = "ls", cwd = "/tmp" })).clamp, nil)
+
+    State.config.builtin_tools = { execute_command = { timeout_soft_limit = 300 } }
+    eq(offered(parse({ command = "ls", cwd = "/tmp", timeout = 301 })).clamp, "Run with 300 s")
+end
+
+T["decline reasons"]["Run with the soft limit approves clamped arguments"] = function()
+    State.config.auto_approve = true
+    answer, choice = false, { id = "clamp" }
+    local parsed = parse({ command = "true", cwd = "/tmp", timeout = 1800 })
+    local decision = shared.handle_auto_approval_decision(parsed)
+    eq(decision, {
+        approve = true,
+        arguments = { command = "true", cwd = "/tmp", timeout = 600, _clamped_from = 1800 },
+    })
+    eq(parsed.arguments.timeout, 1800)
+
+    -- The clamped call is within the soft limit, so it needs no grant.
+    local server, calls = recording_server()
+    eq(select(2, call(server, decision.arguments)), nil)
+    eq(calls[1].timeout, 600)
+end
+
+T["decline reasons"]["Timeout too high quotes the declined timeout"] = function()
+    eq(
+        declined_with({ id = "timeout" }, { command = "ls", cwd = "/tmp", timeout = 1800 }),
+        "The user declined `timeout = 1800` s (soft limit 600 s). Retry with a lower `timeout`, or narrow or split the command."
+    )
 end
 
 T["decline reasons"]["the approval window offers them"] = function()
