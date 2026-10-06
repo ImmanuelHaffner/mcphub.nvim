@@ -8,7 +8,7 @@ local constants = require("mcphub.utils.constants")
 ---@param title string Title of the floating window
 ---@param content string Content to be displayed in the floating window
 ---@param on_save fun(new_content:string) Callback function to be called when the user saves the content
----@param opts {filetype?: string, validate?: function, show_footer?: boolean, start_insert?: boolean, on_cancel?: function, position?: "cursor"|"center", go_to_placeholder?: boolean, virtual_lines?: Array[]} Options for the floating window
+---@param opts {filetype?: string, validate?: function, show_footer?: boolean, start_insert?: boolean, on_cancel?: function, position?: "cursor"|"center", go_to_placeholder?: boolean, virtual_lines?: Array[], zindex?: integer} Options for the floating window
 function M.multiline_input(title, content, on_save, opts)
     opts = opts or {}
     local bufnr = vim.api.nvim_create_buf(false, true)
@@ -45,6 +45,7 @@ function M.multiline_input(title, content, on_save, opts)
         height = height,
         anchor = "NW",
         style = "minimal",
+        zindex = opts.zindex,
         title = { { " " .. title .. " ", Text.highlights.title } },
         title_pos = "center",
         footer = opts.show_footer ~= false and {
@@ -495,7 +496,12 @@ function M.confirm(message, opts)
                     return back()
                 end
                 close_window(false, false, { id = choice.id, text = text })
-            end, { on_cancel = back })
+            end, {
+                on_cancel = back,
+                -- Both floats would otherwise share the default zindex, and the
+                -- input could be drawn behind the window it was opened from.
+                zindex = vim.api.nvim_win_get_config(win).zindex + 1,
+            })
         end
 
         -- Function to execute active option

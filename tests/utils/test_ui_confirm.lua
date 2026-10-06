@@ -73,6 +73,15 @@ T["Other declines with the text typed"] = function()
     eq({ confirmed, cancelled, choice }, { false, false, { id = "other", text = "too broad" } })
 end
 
+T["Other opens its input above the window"] = function()
+    open()
+    local win = vim.api.nvim_get_current_win()
+    press("o")
+    local input = vim.api.nvim_get_current_win()
+    eq(input ~= win, true)
+    eq(vim.api.nvim_win_get_config(input).zindex > vim.api.nvim_win_get_config(win).zindex, true)
+end
+
 T["Other without text returns to the window"] = function()
     local wait = open()
     local win = vim.api.nvim_get_current_win()
