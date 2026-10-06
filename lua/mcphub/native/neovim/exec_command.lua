@@ -218,7 +218,7 @@ function M.handler(req, res)
         return res:error(timeout_err)
     end
 
-    local _, err = exec.start({
+    local job, err = exec.start({
         command = command,
         cwd = path:absolute(),
         capture_bytes = config().capture_bytes,
@@ -233,8 +233,17 @@ function M.handler(req, res)
             end
         end,
     })
-    if err then
+    if not job then
         return res:error(err)
+    end
+    -- CodeCompanion's whole-turn stop calls `kill("sigterm")` on the registered
+    -- handle; route it into the ladder so the whole process group goes.
+    if req.caller and req.caller.register_job then
+        req.caller.register_job({
+            kill = function()
+                job:terminate("stopped")
+            end,
+        })
     end
 end
 

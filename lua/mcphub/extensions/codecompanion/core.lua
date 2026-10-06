@@ -71,6 +71,8 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
                     type = "codecompanion",
                     codecompanion = tools,
                     auto_approve = result.approve,
+                    -- Resources run no process worth stopping, so only tools get it.
+                    register_job = context.register_job,
                 },
                 parse_response = true,
                 callback = function(res, err)

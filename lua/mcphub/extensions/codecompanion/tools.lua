@@ -27,13 +27,15 @@ end
 local function create_static_handler(action_name, has_function_calling, opts)
     ---@param self CodeCompanion.Tools The tools coordinator
     ---@param action MCPHub.ToolCallArgs | MCPHub.ResourceAccessArgs The arguments from the LLM's tool call
-    ---@param cmd_opts { input?: any, output_cb: function } Options including the output callback
+    ---@param cmd_opts { input?: any, output_cb: function, register_job?: fun(job: table) } Options including the output callback
     ---@return nil|{ status: "success"|"error", data: string }
     return function(self, action, cmd_opts)
+        ---@type MCPHub.ToolCallContext
         local context = {
             tool_display_name = action_name,
             is_individual_tool = false,
             action = action_name,
+            register_job = cmd_opts.register_job,
         }
         core.execute_mcp_tool(action, self, cmd_opts.output_cb, context)
     end
@@ -43,6 +45,7 @@ end
 ---@field tool_display_name string
 ---@field is_individual_tool boolean
 ---@field action MCPHub.ActionType
+---@field register_job? fun(job: table) CodeCompanion's hook for the handle its stop (`q`) kills
 
 --- Create handler for individual tools
 ---@param server_name string MCP Server name
@@ -52,7 +55,7 @@ end
 local function create_individual_tool_handler(server_name, tool_name, namespaced_name)
     ---@param self CodeCompanion.Tools The tools coordinator
     ---@param action MCPHub.ToolCallArgs The arguments from the LLM's tool call
-    ---@param cmd_opts { input?: any, output_cb: function } Options including the output callback
+    ---@param cmd_opts { input?: any, output_cb: function, register_job?: fun(job: table) } Options including the output callback
     return function(self, action, cmd_opts)
         local params = {
             server_name = server_name,
@@ -64,6 +67,7 @@ local function create_individual_tool_handler(server_name, tool_name, namespaced
             tool_display_name = namespaced_name,
             is_individual_tool = true,
             action = "use_mcp_tool",
+            register_job = cmd_opts.register_job,
         }
         core.execute_mcp_tool(params, self, cmd_opts.output_cb, context)
     end

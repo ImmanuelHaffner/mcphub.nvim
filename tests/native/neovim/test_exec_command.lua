@@ -12,23 +12,34 @@ local exec_command = require("mcphub.native.neovim.exec_command")
 local prompt_utils = require("mcphub.utils.prompt")
 local spill = require("mcphub.utils.spill")
 
---- Call the handler and wait for its response.
+--- Start the handler; the returned function waits for its response.
 ---@param params table
----@return { content: MCPContent[], isError?: boolean }
-local function call(params)
+---@param caller? table Defaults to an empty caller
+---@return fun(): { content: MCPContent[], isError?: boolean } wait
+local function start(params, caller)
     local result
     local res = ToolResponse:new(function(r)
         result = r.result
     end)
     ---@diagnostic disable-next-line: missing-fields, param-type-mismatch
-    exec_command.handler({ params = params, caller = {} }, res)
-    assert(
-        vim.wait(10000, function()
-            return result ~= nil
-        end, 10),
-        "handler did not respond"
-    )
-    return result
+    exec_command.handler({ params = params, caller = caller or {} }, res)
+    return function()
+        assert(
+            vim.wait(10000, function()
+                return result ~= nil
+            end, 10),
+            "handler did not respond"
+        )
+        return result
+    end
+end
+
+--- Call the handler and wait for its response.
+---@param params table
+---@param caller? table
+---@return { content: MCPContent[], isError?: boolean }
+local function call(params, caller)
+    return start(params, caller)()
 end
 
 local real_dir = spill.DIR
@@ -144,6 +155,36 @@ T["timeout"]["keeps the output captured so far"] = function()
     local result = call({ command = "echo before; sleep 100", cwd = "/tmp", timeout = 1 })
     eq(result.isError, true)
     eq(result.content[1].text:find("Output:\n\nbefore\n", 1, true) ~= nil, true)
+end
+
+T["stop"] = new_set()
+
+T["stop"]["the registered handle stops the command through the ladder"] = function()
+    local handle
+    local wait = start({ command = "sleep 107", cwd = "/tmp" }, {
+        register_job = function(h)
+            handle = h
+        end,
+    })
+    local _, job = next(exec.jobs)
+    eq(type(handle and handle.kill), "function")
+
+    handle:kill("sigterm")
+    eq(wait().isError, nil)
+    eq(job.reason, "stopped")
+    eq(job.last_signal, "sigint")
+    eq(
+        vim.wait(3000, function()
+            return vim.fn.system({ "pgrep", "-f", "sleep 107" }) == ""
+        end, 50),
+        true
+    )
+end
+
+T["stop"]["a caller without register_job runs normally"] = function()
+    local result = call({ command = "echo hi", cwd = "/tmp" }, { type = "avante" })
+    eq(result.isError, nil)
+    eq(result.content[1].text:find("Output:\n\nhi\n", 1, true) ~= nil, true)
 end
 
 T["definition"] = new_set()
