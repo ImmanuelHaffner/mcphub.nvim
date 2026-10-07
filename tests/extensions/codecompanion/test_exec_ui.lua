@@ -1,11 +1,12 @@
 -- Tests for mcphub.extensions.codecompanion.exec_ui: the command block written
--- under a CodeCompanion tool label, and its fold.
+-- under a CodeCompanion tool label, its fold, and the progress line above it.
 --
 -- Run with `make test`, or just this file with
 -- `make test_file FILE=tests/extensions/codecompanion/test_exec_ui.lua`.
 local new_set = MiniTest.new_set
 local eq = MiniTest.expect.equality
 
+local State = require("mcphub.state")
 local exec_command = require("mcphub.native.neovim.exec_command")
 local exec_ui = require("mcphub.extensions.codecompanion.exec_ui")
 local native = require("mcphub.native")
@@ -114,10 +115,48 @@ local function finish_tool(shift)
     vim.api.nvim_exec_autocmds("User", { pattern = "CodeCompanionToolFinished", data = { bufnr = chat.buf } })
 end
 
+local MiB, GiB = 1024 * 1024, 1024 * 1024 * 1024
+
+--- A running job as the runner records it, with `fields` overriding.
+---@param fields? table
+local function fake_job(fields)
+    return vim.tbl_extend("force", {
+        started_at = vim.uv.now(),
+        exited = false,
+        stats = { out_bytes = 0, out_lines = 0 },
+    }, fields or {})
+end
+
+--- An exited job that ran for 12.3 s and exited 0, with `fields` overriding.
+---@param fields? table
+local function ended_job(fields)
+    return fake_job(
+        vim.tbl_extend("force", { started_at = 0, ended_at = 12300, exited = true, exit_code = 0 }, fields or {})
+    )
+end
+
+--- The 0-based rows of the job's key marks and progress lines, and the
+--- progress lines' text.
+local function progress_marks()
+    local found = { key = {}, progress = {}, text = {} }
+    local registry = exec_ui.registry[chat.buf] or {}
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(chat.buf, exec_ui.NS, 0, -1, { details = true })) do
+        if mark[4].virt_lines then
+            table.insert(found.progress, mark[2])
+            table.insert(found.text, mark[4].virt_lines[1][1][1])
+        elseif registry[mark[1]] then
+            table.insert(found.key, mark[2])
+        end
+    end
+    return found
+end
+
 local T = new_set({
     hooks = {
         pre_case = function()
             real.is_native_server = native.is_native_server
+            real.builtin_tools = State.config.builtin_tools
+            State.config.builtin_tools = { execute_command = { refresh_ms = 20 } }
             native.is_native_server = function(name)
                 local plain = { name = "plain", label = exec_command.label }
                 return name == "neovim" and { capabilities = { tools = { exec_command.definition, plain } } } or nil
@@ -144,6 +183,11 @@ local T = new_set({
             end
             vim.api.nvim_win_close(chat.win, true)
             vim.api.nvim_buf_delete(chat.buf, { force = true })
+            -- With the buffer gone, the next redraw drops its progress lines and stops.
+            vim.wait(1000, function()
+                return not exec_ui._ticker_active()
+            end, 10)
+            State.config.builtin_tools = real.builtin_tools
         end,
     },
 })
@@ -232,6 +276,69 @@ T["fold line"]["moves with the label when lines are inserted above it"] = functi
     eq(summary(), nil)
     eq(summary(LABEL_ROW + 1).chunks(), { DONE, { LABEL, "CodeCompanionChatToolSuccess" } })
     eq(fold(LABEL_ROW + 2), { LABEL_ROW + 2, FENCE_ROW + 2 })
+end
+
+T["progress line"] = new_set()
+
+T["progress line"]["renders a running job"] = function()
+    local now = 100000
+    local job = fake_job({
+        started_at = now - 12000,
+        timeout_ms = 30000,
+        stats = { out_lines = 1200, out_bytes = 3.4 * MiB, rss_bytes = 210 * MiB, last_output_at = now - 4000 },
+    })
+    eq(exec_ui.render(job, now), { { "⏱ 12s/30s · 1.2k lines · 3 MiB · RSS 210 MiB · idle 4s", "Comment" } })
+end
+
+T["progress line"]["renders how the job ended"] = function()
+    local function text(fields)
+        return exec_ui.render(ended_job(fields), 0)[1]
+    end
+    eq(text({}), { "12.3s · exit 0", "Comment" })
+    eq(text({ exit_code = 3 }), { "12.3s · exit 3", "DiagnosticWarn" })
+    eq(text({ reason = "timeout", timeout_ms = 30000, exit_code = 130 }), { "timed out after 30s", "DiagnosticWarn" })
+    eq(text({ reason = "cancelled", ended_at = 47400 })[1], "cancelled after 47s")
+    eq(text({ reason = "stopped" })[1], "stopped")
+    eq(text({ reason = "memory", memory_peak = 8.3 * GiB, memory_limit = 8 * GiB })[1], "killed: RSS 8.3 GiB > 8 GiB")
+end
+
+T["progress line"]["attach marks the label and puts the line above it"] = function()
+    exec_ui.attach(fake_tools(), fake_job())
+    local marks = progress_marks()
+    eq(marks.key, { LABEL_ROW - 1 })
+    eq(marks.progress, { LABEL_ROW - 2 })
+    eq(vim.startswith(marks.text[1], "⏱ 0s · 0 lines · 0 B · idle 0s"), true)
+end
+
+T["progress line"]["is a no-op against an unpatched CodeCompanion"] = function()
+    exec_ui.attach(fake_tools({}), fake_job())
+    eq(vim.api.nvim_buf_get_extmarks(chat.buf, exec_ui.NS, 0, -1, {}), {})
+end
+
+T["progress line"]["the marks survive the label's completion"] = function()
+    exec_ui.attach(fake_tools(), fake_job())
+    vim.bo[chat.buf].modifiable = true
+    vim.api.nvim_buf_set_lines(chat.buf, LABEL_ROW - 1, LABEL_ROW, false, { "done" })
+    vim.bo[chat.buf].modifiable = false
+    local marks = progress_marks()
+    eq({ marks.key, marks.progress }, { { LABEL_ROW - 1 }, { LABEL_ROW - 2 } })
+    insert_above(2)
+    marks = progress_marks()
+    eq({ marks.key, marks.progress }, { { LABEL_ROW + 1 }, { LABEL_ROW } })
+end
+
+T["progress line"]["shows how the job ended, then stops redrawing"] = function()
+    local job = fake_job()
+    exec_ui.attach(fake_tools(), job)
+    eq(exec_ui._ticker_active(), true)
+    job.exited, job.ended_at, job.exit_code = true, job.started_at + 1500, 0
+    eq(
+        vim.wait(1000, function()
+            return not exec_ui._ticker_active()
+        end, 10),
+        true
+    )
+    eq(progress_marks().text, { "1.5s · exit 0" })
 end
 
 return T

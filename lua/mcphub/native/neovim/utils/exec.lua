@@ -135,6 +135,23 @@ function M.resolve_memory_limit(limit)
     return math.min(0.25 * vim.uv.get_total_memory(), M.MAX_AUTO_MEMORY_LIMIT)
 end
 
+--- A size in bytes as people read it: whole bytes, KiB or MiB below 1 GiB,
+--- else GiB with at most two decimals.
+---@param n number Bytes
+---@return string
+function M.mem_size(n)
+    local GiB = 1024 * 1024 * 1024
+    if n >= GiB then
+        return (("%.2f"):format(n / GiB):gsub("%.?0+$", "")) .. " GiB"
+    end
+    for _, unit in ipairs({ { 1024 * 1024, "MiB" }, { 1024, "KiB" } }) do
+        if n >= unit[1] then
+            return ("%.0f %s"):format(n / unit[1], unit[2])
+        end
+    end
+    return ("%.0f B"):format(n)
+end
+
 --- RSS per process group from the output of `ps -A -o pgid=,rss=`, whose RSS
 --- column is in KiB on Linux and macOS alike. Summing double-counts shared
 --- pages, which errs on the side of stopping a command early.

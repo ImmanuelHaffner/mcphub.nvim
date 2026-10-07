@@ -1,5 +1,8 @@
 --- CodeCompanion chat decorations for native tools: the command a tool runs,
---- written as a code block under its label and folded together with it.
+--- written as a code block under its label and folded together with it, and
+--- a live progress line above the fold while the command runs.
+local State = require("mcphub.state")
+local exec = require("mcphub.native.neovim.utils.exec")
 local fence = require("mcphub.utils.fence")
 local shared = require("mcphub.extensions.shared")
 
@@ -219,6 +222,157 @@ function M.show_command(tools, parsed_params)
     local key = tools.bufnr or bufnr
     pending[key] = pending[key] or {}
     table.insert(pending[key], entry)
+end
+
+local DEFAULT_REFRESH_MS = 500
+
+--- Jobs by chat buffer and by the id of the extmark on their label row.
+---@type table<integer, table<integer, MCPHub.Exec.Job>>
+M.registry = {}
+
+---@class MCPHub.ExecUI.Progress
+---@field bufnr integer
+---@field mark integer Extmark carrying the progress line
+---@field job MCPHub.Exec.Job
+
+--- Progress lines still to redraw: their job runs, or exited since the last
+--- redraw.
+---@type MCPHub.ExecUI.Progress[]
+local live = {}
+
+---@type uv.uv_timer_t?
+local ticker
+
+---@param n integer
+---@return string
+local function line_count(n)
+    if n == 1 then
+        return "1 line"
+    end
+    for _, unit in ipairs({ { 1e9, "G" }, { 1e6, "M" }, { 1e3, "k" } }) do
+        if n >= unit[1] then
+            return (("%.1f"):format(n / unit[1]):gsub("%.0$", "")) .. unit[2] .. " lines"
+        end
+    end
+    return n .. " lines"
+end
+
+--- The progress line: while the job runs, elapsed time against its timeout,
+--- output, RSS and the time since the last output; once it has exited, how
+--- long it ran and how it ended, which the folded label's status icon would
+--- otherwise be the only sign of.
+---@param job MCPHub.Exec.Job
+---@param now integer `vim.uv.now()`
+---@return string[][] chunks
+function M.render(job, now)
+    if job.exited then
+        local ran = (job.ended_at or now) - job.started_at
+        local text
+        if job.reason == "timeout" then
+            text = ("timed out after %gs"):format(job.timeout_ms / 1000)
+        elseif job.reason == "cancelled" then
+            text = ("cancelled after %ds"):format(math.floor(ran / 1000))
+        elseif job.reason == "stopped" then
+            text = "stopped"
+        elseif job.reason == "memory" then
+            text = ("killed: RSS %s > %s"):format(exec.mem_size(job.memory_peak), exec.mem_size(job.memory_limit))
+        else
+            text = ("%.1fs · exit %s"):format(ran / 1000, tostring(job.exit_code))
+        end
+        local ok = job.reason == nil and job.exit_code == 0
+        return { { text, ok and "Comment" or "DiagnosticWarn" } }
+    end
+    local stats = job.stats
+    local elapsed = ("⏱ %ds"):format(math.floor((now - job.started_at) / 1000))
+    if job.timeout_ms then
+        elapsed = elapsed .. ("/%gs"):format(job.timeout_ms / 1000)
+    end
+    local parts = { elapsed, line_count(stats.out_lines), exec.mem_size(stats.out_bytes) }
+    if stats.rss_bytes then
+        parts[#parts + 1] = "RSS " .. exec.mem_size(stats.rss_bytes)
+    end
+    parts[#parts + 1] = ("idle %ds"):format(math.floor((now - (stats.last_output_at or job.started_at)) / 1000))
+    return { { table.concat(parts, " · "), "Comment" } }
+end
+
+---@param entry MCPHub.ExecUI.Progress
+---@param now integer
+---@return boolean drawn False once the line went with its buffer or mark
+local function draw(entry, now)
+    if not vim.api.nvim_buf_is_valid(entry.bufnr) then
+        return false
+    end
+    local pos = vim.api.nvim_buf_get_extmark_by_id(entry.bufnr, M.NS, entry.mark, {})
+    if not pos[1] then
+        return false
+    end
+    vim.api.nvim_buf_set_extmark(entry.bufnr, M.NS, pos[1], 0, {
+        id = entry.mark,
+        virt_lines = { M.render(entry.job, now) },
+    })
+    return true
+end
+
+--- Redraw every live progress line, the final one for a job that has exited,
+--- and stop once none is left.
+local function tick()
+    local now = vim.uv.now()
+    for i = #live, 1, -1 do
+        local entry = live[i]
+        if not draw(entry, now) or entry.job.exited then
+            table.remove(live, i)
+        end
+    end
+    if #live == 0 and ticker then
+        ticker:stop()
+        ticker:close()
+        ticker = nil
+    end
+end
+
+local function start_ticker()
+    if ticker then
+        return
+    end
+    local cfg = (State.config.builtin_tools or {}).execute_command or {}
+    local interval = cfg.refresh_ms or DEFAULT_REFRESH_MS
+    ticker = vim.uv.new_timer()
+    ticker:start(interval, interval, vim.schedule_wrap(tick))
+end
+
+--- Register `job` under its tool's label and show its progress line directly
+--- above the label. Does nothing against a CodeCompanion without
+--- `get_tool_label`.
+---@param tools table CodeCompanion's tools coordinator
+---@param job MCPHub.Exec.Job
+function M.attach(tools, job)
+    local orchestrator = tools and tools.chat and tools.chat.tool_orchestrator
+    if not (orchestrator and orchestrator.get_tool_label) then
+        return
+    end
+    local ok, label = pcall(orchestrator.get_tool_label, orchestrator)
+    if not (ok and label) then
+        return
+    end
+    local bufnr, row = label.bufnr, label.row
+    -- CodeCompanion rewrites the label row with `nvim_buf_set_lines`, which
+    -- pushes a mark with the default gravity onto the next row.
+    local key = vim.api.nvim_buf_set_extmark(bufnr, M.NS, row, 0, { right_gravity = false })
+    M.registry[bufnr] = M.registry[bufnr] or {}
+    M.registry[bufnr][key] = job
+    -- A closed fold hides the decorations on its rows, so the line hangs off the
+    -- blank row CodeCompanion writes before every tool block.
+    local mark = vim.api.nvim_buf_set_extmark(bufnr, M.NS, row - 1, 0, {
+        virt_lines = { M.render(job, vim.uv.now()) },
+    })
+    table.insert(live, { bufnr = bufnr, mark = mark, job = job })
+    start_ticker()
+end
+
+--- Whether the progress lines' redraw timer is running; for tests.
+---@return boolean
+function M._ticker_active()
+    return ticker ~= nil
 end
 
 return M

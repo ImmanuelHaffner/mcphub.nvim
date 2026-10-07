@@ -204,6 +204,30 @@ T["stop"]["a caller without register_job runs normally"] = function()
     eq(result.content[1].text:find("Output:\n\nhi\n", 1, true) ~= nil, true)
 end
 
+T["on_job"] = new_set()
+
+T["on_job"]["receives the running job"] = function()
+    local seen
+    local wait = start({ command = "sleep 0.2", cwd = "/tmp" }, {
+        on_job = function(job)
+            seen = job
+        end,
+    })
+    local _, job = next(exec.jobs)
+    eq(seen ~= nil and seen == job, true)
+    eq(seen.exited, false)
+    eq(wait().isError, nil)
+end
+
+T["on_job"]["a failing on_job does not fail the command"] = function()
+    local result = call({ command = "echo hi", cwd = "/tmp" }, {
+        on_job = function()
+            error("boom")
+        end,
+    })
+    eq(result.isError, nil)
+end
+
 T["definition"] = new_set()
 
 T["definition"]["renders the description and schema from the config"] = function()

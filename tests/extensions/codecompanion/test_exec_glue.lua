@@ -9,6 +9,7 @@ local eq = MiniTest.expect.equality
 local State = require("mcphub.state")
 local core = require("mcphub.extensions.codecompanion.core")
 local exec_command = require("mcphub.native.neovim.exec_command")
+local exec_ui = require("mcphub.extensions.codecompanion.exec_ui")
 local mcphub = require("mcphub")
 local native = require("mcphub.native")
 local shared = require("mcphub.extensions.shared")
@@ -78,6 +79,7 @@ local T = new_set({
             real.is_auto_approved_in_server = shared.is_auto_approved_in_server
             real.show_mcp_tool_prompt = shared.show_mcp_tool_prompt
             real.get_hub_instance = mcphub.get_hub_instance
+            real.attach = exec_ui.attach
             real.builtin_tools = State.config.builtin_tools
             real.modules = {}
             for name, module in pairs(FAKE_MODULES) do
@@ -109,6 +111,7 @@ local T = new_set({
             shared.is_auto_approved_in_server = real.is_auto_approved_in_server
             shared.show_mcp_tool_prompt = real.show_mcp_tool_prompt
             mcphub.get_hub_instance = real.get_hub_instance
+            exec_ui.attach = real.attach
             State.config.builtin_tools = real.builtin_tools
             for name, module in pairs(real.modules) do
                 package.loaded[name] = module or nil
@@ -153,6 +156,21 @@ T["register_job"]["reaches the caller from an individual tool"] = function()
     local register_job = run_cmd(tool, { command = "ls", cwd = "/tmp" })
     eq(#called, 1)
     eq(called[1].caller.register_job, register_job)
+end
+
+T["on_job"] = new_set()
+
+T["on_job"]["hands the job to the chat's progress line"] = function()
+    local attached = {}
+    exec_ui.attach = function(_, job)
+        table.insert(attached, job)
+    end
+    execute({ command = "ls", cwd = "/tmp" })
+    eq(#called, 1)
+    local job = { id = 1 }
+    called[1].caller.on_job(job)
+    eq(#attached, 1)
+    eq(attached[1] == job, true)
 end
 
 T["cmd_string"] = new_set()

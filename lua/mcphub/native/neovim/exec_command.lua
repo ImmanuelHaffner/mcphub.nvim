@@ -16,6 +16,7 @@ local M = {}
 ---@field memory_limit "auto"|number|false? RSS in bytes above which a command is terminated; "auto" is min(25 % RAM, 8 GiB)
 ---@field nice integer|false? CPU niceness of commands, within [0, 19]; `false` runs them at Neovim's priority
 ---@field oom_score_adj integer|false? Linux only: OOM-killer score of commands; `false` leaves it alone
+---@field refresh_ms integer? How often the chat's progress line for a running command is redrawn, in ms
 ---@field timeout_default number? Seconds a command may run when the call passes no `timeout`
 ---@field timeout_soft_limit number? Largest `timeout`, in seconds, that runs without the user's confirmation
 
@@ -54,18 +55,6 @@ local function size(n)
         end
     end
     return ("%d bytes"):format(n)
-end
-
---- A memory size as people read it: whole MiB below 1 GiB, else GiB with at
---- most two decimals.
----@param n number Bytes
----@return string
-local function mem_size(n)
-    local GiB = 1024 * 1024 * 1024
-    if n < GiB then
-        return ("%.0f MiB"):format(n / (1024 * 1024))
-    end
-    return (("%.2f"):format(n / GiB):gsub("%.?0+$", "")) .. " GiB"
 end
 
 --- The timeout a call runs under, in seconds; `0` means none. An absent
@@ -171,12 +160,14 @@ function M.description()
     local memory_limit = exec.resolve_memory_limit(config().memory_limit)
     if nice and memory_limit then
         lines[#lines + 1] = ("- Commands run at reduced CPU priority and are terminated if their memory use exceeds %s."):format(
-            mem_size(memory_limit)
+            exec.mem_size(memory_limit)
         )
     elseif nice then
         lines[#lines + 1] = "- Commands run at reduced CPU priority."
     elseif memory_limit then
-        lines[#lines + 1] = ("- Commands are terminated if their memory use exceeds %s."):format(mem_size(memory_limit))
+        lines[#lines + 1] = ("- Commands are terminated if their memory use exceeds %s."):format(
+            exec.mem_size(memory_limit)
+        )
     end
     return table.concat(lines, "\n")
 end
@@ -235,8 +226,8 @@ function M.format_result(job, clamped_from)
         table.insert(
             parts,
             ("Killed: memory use %s exceeded the %s limit%s.\n"):format(
-                mem_size(job.memory_peak),
-                mem_size(job.memory_limit),
+                exec.mem_size(job.memory_peak),
+                exec.mem_size(job.memory_limit),
                 job.last_signal and (" (%s)"):format(job.last_signal:upper()) or ""
             )
         )
@@ -322,6 +313,10 @@ function M.handler(req, res)
                 job:terminate("stopped")
             end,
         })
+    end
+    -- The chat's progress display; failing to show it must not fail the command.
+    if req.caller and req.caller.on_job then
+        pcall(req.caller.on_job, job)
     end
 end
 

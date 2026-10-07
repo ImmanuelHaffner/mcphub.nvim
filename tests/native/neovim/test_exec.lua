@@ -466,6 +466,18 @@ T["memory"]["resolves the limit"] = function()
     assert(ok, err)
 end
 
+T["memory"]["formats sizes in binary units"] = function()
+    eq(exec.mem_size(0), "0 B")
+    eq(exec.mem_size(1023), "1023 B")
+    eq(exec.mem_size(1024), "1 KiB")
+    eq(exec.mem_size(512 * 1024), "512 KiB")
+    eq(exec.mem_size(MiB), "1 MiB")
+    eq(exec.mem_size(3.4 * MiB), "3 MiB")
+    eq(exec.mem_size(GiB), "1 GiB")
+    eq(exec.mem_size(1.01 * GiB), "1.01 GiB")
+    eq(exec.mem_size(8.3 * GiB), "8.3 GiB")
+end
+
 T["memory"]["samples the process group's RSS"] = function()
     local job = spawn("sleep 3")
     eq(

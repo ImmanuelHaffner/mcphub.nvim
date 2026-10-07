@@ -78,6 +78,9 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
                     auto_approve = result.approve,
                     -- Resources run no process worth stopping, so only tools get it.
                     register_job = context.register_job,
+                    on_job = function(job)
+                        exec_ui.attach(tools, job)
+                    end,
                 },
                 parse_response = true,
                 callback = function(res, err)

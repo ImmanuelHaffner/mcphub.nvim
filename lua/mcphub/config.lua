@@ -98,6 +98,7 @@ local defaults = {
             -- RSS of a command's process group, in bytes, above which it is terminated; sampled once a second.
             -- "auto": min(25 % of RAM, 8 GiB); false: no limit.
             memory_limit = "auto",
+            refresh_ms = 500, -- How often the progress line above a running command's fold is redrawn, in ms
         },
     },
     --- Custom function to parse json file (e.g `require'json5'.parse` from `https://github.com/Joakker/lua-json5 to parse json5 syntax for .vscode/mcp.json like files)
