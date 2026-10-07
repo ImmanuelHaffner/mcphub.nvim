@@ -14,7 +14,7 @@ local SEQ_2M = "seq -f %.0f 1 2000000"
 
 --- Start `command` in /tmp without waiting for it.
 ---@param command string
----@param opts? { capture_bytes?: integer, kill_ladder?: MCPHub.Exec.KillStep[], timeout_ms?: integer, nice?: integer|false }
+---@param opts? { capture_bytes?: integer, kill_ladder?: MCPHub.Exec.KillStep[], timeout_ms?: integer, nice?: integer|false, memory_limit?: number|false }
 ---@return MCPHub.Exec.Job job
 ---@return fun(): MCPHub.Exec.Job? exited The job once `on_exit` has run
 local function spawn(command, opts)
@@ -26,6 +26,7 @@ local function spawn(command, opts)
         kill_ladder = opts and opts.kill_ladder,
         timeout_ms = opts and opts.timeout_ms,
         nice = opts and opts.nice,
+        memory_limit = opts and opts.memory_limit,
         on_exit = function(j)
             done = j
         end,
@@ -429,6 +430,92 @@ T["priority"]["still kills the whole process group"] = function()
         return exited() ~= nil
     end, 10)
     eq(pgrep("sleep 103"), false)
+end
+
+T["memory"] = new_set()
+
+local GiB = 1024 * MiB
+
+-- `bytearray(n)` would be calloc'd as untouched zero pages that never count
+-- towards RSS; repeating a byte writes every page.
+local ALLOC_256M = [[python3 -c "x = b'\x01' * (256 * 2**20); import time; time.sleep(30)"]]
+
+T["memory"]["parses ps output into RSS per process group"] = function()
+    eq(exec.parse_ps("  1  100\n 42  200\n 42  300\n"), { [1] = 102400, [42] = 512000 })
+    eq(exec.parse_ps(""), {})
+end
+
+T["memory"]["resolves the limit"] = function()
+    local total = vim.uv.get_total_memory
+    local ok, err = pcall(function()
+        vim.uv.get_total_memory = function()
+            return 64 * GiB
+        end
+        eq(exec.resolve_memory_limit("auto"), 8 * GiB)
+        eq(exec.resolve_memory_limit(nil), 8 * GiB)
+        vim.uv.get_total_memory = function()
+            return 16 * GiB
+        end
+        eq(exec.resolve_memory_limit("auto"), 4 * GiB)
+        eq(exec.resolve_memory_limit("bogus"), 4 * GiB)
+        eq(exec.resolve_memory_limit(-1), 4 * GiB)
+        eq(exec.resolve_memory_limit(256 * MiB), 256 * MiB)
+        eq(exec.resolve_memory_limit(false), false)
+    end)
+    vim.uv.get_total_memory = total
+    assert(ok, err)
+end
+
+T["memory"]["samples the process group's RSS"] = function()
+    local job = spawn("sleep 3")
+    eq(
+        vim.wait(2500, function()
+            return (job.stats.rss_bytes or 0) > 0
+        end, 50),
+        true
+    )
+end
+
+T["memory"]["terminates a group over the limit"] = function()
+    local started = vim.uv.now()
+    local _, exited = spawn(ALLOC_256M, { memory_limit = 64 * MiB, kill_ladder = SHORT_LADDER })
+    eq(
+        vim.wait(3000, function()
+            return exited() ~= nil
+        end, 20),
+        true
+    )
+    local job = assert(exited())
+    eq(job.reason, "memory")
+    eq(job.memory_peak > 64 * MiB, true)
+    eq(vim.uv.now() - started < 3000, true)
+end
+
+T["memory"]["leaves the group alone without a limit"] = function()
+    local job = spawn(ALLOC_256M, { memory_limit = false, kill_ladder = SHORT_LADDER })
+    eq(
+        vim.wait(5000, function()
+            return (job.stats.rss_bytes or 0) > 128 * MiB
+        end, 50),
+        true
+    )
+    eq(job.terminating, false)
+end
+
+T["memory"]["stops the sampler once no job runs"] = function()
+    local job, exited = spawn("sleep 0.5")
+    eq(exec._sampler_active(), true)
+    vim.wait(3000, function()
+        return exited() ~= nil
+    end, 10)
+    eq(job.exited, true)
+    -- Jobs killed by an earlier case's cleanup may still be exiting.
+    eq(
+        vim.wait(3000, function()
+            return not exec._sampler_active()
+        end, 10),
+        true
+    )
 end
 
 T["validate_ladder"] = new_set()

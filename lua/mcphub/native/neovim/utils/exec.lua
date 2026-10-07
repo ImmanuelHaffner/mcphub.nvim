@@ -6,6 +6,8 @@
 --- tail of the output are kept, while the full output is streamed to a log
 --- file in the spill directory. A job is stopped by signalling its whole
 --- process group along an escalation ladder that always ends in SIGKILL.
+--- While jobs run, the RSS of each one's process group is sampled once a
+--- second, and a group over its memory limit is stopped the same way.
 local spill = require("mcphub.utils.spill")
 
 local M = {}
@@ -113,6 +115,42 @@ end
 --- rather than on every command.
 ---@type table<string, true>
 local warned_nice = {}
+
+--- Ceiling of the "auto" memory limit, which is otherwise a quarter of RAM.
+M.MAX_AUTO_MEMORY_LIMIT = 8 * 1024 * 1024 * 1024
+
+--- The RSS in bytes above which the watchdog terminates a job's process
+--- group. A positive number is taken as bytes and `false` disables the
+--- watchdog; anything else, "auto" included, means a quarter of RAM, but at
+--- most `MAX_AUTO_MEMORY_LIMIT`.
+---@param limit any
+---@return number|false bytes
+function M.resolve_memory_limit(limit)
+    if limit == false then
+        return false
+    end
+    if type(limit) == "number" and limit > 0 then
+        return limit
+    end
+    return math.min(0.25 * vim.uv.get_total_memory(), M.MAX_AUTO_MEMORY_LIMIT)
+end
+
+--- RSS per process group from the output of `ps -A -o pgid=,rss=`, whose RSS
+--- column is in KiB on Linux and macOS alike. Summing double-counts shared
+--- pages, which errs on the side of stopping a command early.
+---@param stdout string
+---@return table<integer, integer> rss Bytes by process-group id
+function M.parse_ps(stdout)
+    local rss = {}
+    for line in stdout:gmatch("[^\n]+") do
+        local pgid, kib = line:match("^%s*(%d+)%s+(%d+)")
+        if pgid then
+            pgid = tonumber(pgid)
+            rss[pgid] = (rss[pgid] or 0) + tonumber(kib) * 1024
+        end
+    end
+    return rss
+end
 
 ---@class MCPHub.Exec.Capture
 ---@field half integer Byte budget of the head and of the tail; also the longest line kept
@@ -317,6 +355,7 @@ M.Capture = Capture
 ---@field out_bytes integer Bytes received on stdout and stderr
 ---@field out_lines integer Lines received on stdout and stderr
 ---@field last_output_at? integer `vim.uv.now()` when output last arrived
+---@field rss_bytes? integer The process group's RSS at the last sample
 
 ---@class MCPHub.Exec.Job
 ---@field id integer `jobstart` id
@@ -337,6 +376,8 @@ M.Capture = Capture
 ---@field last_signal? string Last signal sent to the process group
 ---@field timeout_ms? integer Timeout the job runs under; absent means none
 ---@field _timer? uv.uv_timer_t Pending timeout
+---@field memory_limit number|false RSS in bytes above which the watchdog terminates the job; `false`: none
+---@field memory_peak? integer RSS of the sample that tripped the watchdog
 
 ---@alias MCPHub.Exec.TerminateReason "timeout" | "cancelled" | "stopped" | "memory"
 
@@ -348,6 +389,7 @@ M.Capture = Capture
 ---@field timeout_ms? integer Calls `terminate("timeout")` after this long; absent or 0 means no timeout
 ---@field nice? integer|false Niceness the command runs at (see `resolve_nice`); `false` keeps Neovim's
 ---@field oom_score_adj? integer|false OOM-killer score on Linux; absent means the default, `false` none
+---@field memory_limit? "auto"|number|false Watchdog limit (see `resolve_memory_limit`); absent means "auto"
 ---@field on_exit? fun(job: MCPHub.Exec.Job) Called once, after all output has been captured
 
 --- Running jobs by `jobstart` id.
@@ -459,6 +501,66 @@ end
 
 M.Job = Job
 
+local SAMPLE_MS = 1000
+
+--- One timer samples every running job, and only while there is one.
+---@type { timer?: uv.uv_timer_t, busy: boolean }
+local sampler = { busy = false }
+
+--- Record each running job's RSS from one `ps`, and terminate the jobs over
+--- their memory limit. A tick is skipped while the previous `ps` still runs.
+local function sample()
+    if sampler.busy then
+        return
+    end
+    sampler.busy = true
+    local ok = pcall(vim.system, { "ps", "-A", "-o", "pgid=,rss=" }, { text = true }, function(out)
+        -- `terminate` may notify, which a fast event context does not allow.
+        vim.schedule(function()
+            sampler.busy = false
+            if out.code ~= 0 then
+                return
+            end
+            local rss = M.parse_ps(out.stdout or "")
+            for _, job in pairs(M.jobs) do
+                local bytes = rss[job.pid]
+                if bytes then
+                    job.stats.rss_bytes = bytes
+                    if job.memory_limit and bytes > job.memory_limit and not job.terminating then
+                        job.memory_peak = bytes
+                        job:terminate("memory")
+                    end
+                end
+            end
+        end)
+    end)
+    if not ok then
+        sampler.busy = false
+    end
+end
+
+local function start_sampler()
+    if sampler.timer then
+        return
+    end
+    sampler.timer = vim.uv.new_timer()
+    sampler.timer:start(SAMPLE_MS, SAMPLE_MS, vim.schedule_wrap(sample))
+end
+
+local function stop_sampler_if_idle()
+    if sampler.timer and next(M.jobs) == nil then
+        sampler.timer:stop()
+        sampler.timer:close()
+        sampler.timer = nil
+    end
+end
+
+--- Whether the RSS sampler's timer is running; for tests.
+---@return boolean
+function M._sampler_active()
+    return sampler.timer ~= nil
+end
+
 ---@param opts MCPHub.Exec.Opts
 ---@return MCPHub.Exec.Job? job
 ---@return string? err
@@ -479,6 +581,7 @@ function M.start(opts)
         exited = false,
         kill_ladder = opts.kill_ladder,
         timeout_ms = opts.timeout_ms,
+        memory_limit = M.resolve_memory_limit(opts.memory_limit),
         terminating = false,
         stdout = Capture.new({ capture_bytes = opts.capture_bytes }),
         stderr = Capture.new({ capture_bytes = opts.capture_bytes, prefix = "[stderr] " }),
@@ -538,6 +641,7 @@ function M.start(opts)
             job.ended_at = vim.uv.now()
             job.exited = true
             M.jobs[job.id] = nil
+            stop_sampler_if_idle()
             if opts.on_exit then
                 opts.on_exit(job)
             end
@@ -563,6 +667,7 @@ function M.start(opts)
     job.id = id
     job.pid = vim.fn.jobpid(id)
     M.jobs[id] = job
+    start_sampler()
     if opts.timeout_ms and opts.timeout_ms > 0 then
         job._timer = vim.uv.new_timer()
         job._timer:start(

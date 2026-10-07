@@ -157,6 +157,23 @@ T["timeout"]["keeps the output captured so far"] = function()
     eq(result.content[1].text:find("Output:\n\nbefore\n", 1, true) ~= nil, true)
 end
 
+T["memory"] = new_set()
+
+T["memory"]["reports a command killed over the memory limit"] = function()
+    State.config.builtin_tools = {
+        execute_command = { memory_limit = 64 * 1024 * 1024, kill_ladder = { { "sigint", 200 } } },
+    }
+    -- Repeating a byte writes every page; `bytearray(n)` would leave them untouched.
+    local result = call({
+        command = [[echo before; python3 -c "x = b'\x01' * (256 * 2**20); import time; time.sleep(30)"]],
+        cwd = "/tmp",
+    })
+    local text = result.content[1].text
+    eq(result.isError, true)
+    eq(text:match("^Killed: memory use %d+ MiB exceeded the 64 MiB limit %(SIGINT%)%.\n") ~= nil, true)
+    eq(text:find("Output:\n\nbefore\n", 1, true) ~= nil, true)
+end
+
 T["stop"] = new_set()
 
 T["stop"]["the registered handle stops the command through the ladder"] = function()
@@ -196,13 +213,21 @@ T["definition"]["renders the description and schema from the config"] = function
             timeout_soft_limit = 300,
             capture_bytes = 1024 * 1024,
             kill_ladder = { { "sigterm", 1000 } },
+            memory_limit = 512 * 1024 * 1024,
         },
     }
     local description = prompt_utils.get_description(exec_command.definition)
     eq(description:find("Default: 45. Values up to 300 run without asking", 1, true) ~= nil, true)
     eq(description:find("receives SIGTERM, then SIGKILL;", 1, true) ~= nil, true)
     eq(description:find("larger than 1 MiB per stream", 1, true) ~= nil, true)
-    eq(description:find("Commands run at reduced CPU priority.", 1, true) ~= nil, true)
+    eq(
+        description:find(
+            "- Commands run at reduced CPU priority and are terminated if their memory use exceeds 512 MiB.",
+            1,
+            true
+        ) ~= nil,
+        true
+    )
     eq(description:find("nice -n", 1, true), nil)
     local schema = prompt_utils.get_inputSchema(exec_command.definition)
     eq(schema.properties.timeout.type, "number")
@@ -211,9 +236,20 @@ T["definition"]["renders the description and schema from the config"] = function
 end
 
 T["definition"]["omits the priority sentence when nice is off"] = function()
-    State.config.builtin_tools = { execute_command = { nice = false } }
+    State.config.builtin_tools = { execute_command = { nice = false, memory_limit = 3 * 1024 * 1024 * 1024 / 2 } }
     local description = prompt_utils.get_description(exec_command.definition)
     eq(description:find("reduced CPU priority", 1, true), nil)
+    eq(description:find("- Commands are terminated if their memory use exceeds 1.5 GiB.", 1, true) ~= nil, true)
+
+    State.config.builtin_tools = { execute_command = { nice = false, memory_limit = false } }
+    eq(prompt_utils.get_description(exec_command.definition):find("terminated if their memory", 1, true), nil)
+end
+
+T["definition"]["omits the memory clause without a limit"] = function()
+    State.config.builtin_tools = { execute_command = { memory_limit = false } }
+    local description = prompt_utils.get_description(exec_command.definition)
+    eq(description:find("- Commands run at reduced CPU priority.", 1, true) ~= nil, true)
+    eq(description:find("memory use", 1, true), nil)
 end
 
 T["definition"]["labels the call with the command on one line"] = function()

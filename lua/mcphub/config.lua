@@ -95,6 +95,9 @@ local defaults = {
             kill_ladder = { { "sigint", 2000 }, { "sigterm", 3000 } },
             nice = 10, -- CPU niceness of commands, within [0, 19] (anything else is clamped); false: Neovim's priority
             oom_score_adj = 1000, -- Linux only: OOM-killer score of commands, so they go before Neovim; false: unchanged
+            -- RSS of a command's process group, in bytes, above which it is terminated; sampled once a second.
+            -- "auto": min(25 % of RAM, 8 GiB); false: no limit.
+            memory_limit = "auto",
         },
     },
     --- Custom function to parse json file (e.g `require'json5'.parse` from `https://github.com/Joakker/lua-json5 to parse json5 syntax for .vscode/mcp.json like files)

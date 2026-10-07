@@ -13,6 +13,7 @@ local M = {}
 ---@class MCPHub.ExecuteCommandConfig
 ---@field capture_bytes integer? Output kept in memory per stream; the rest is only in the log file
 ---@field kill_ladder MCPHub.Exec.KillStep[]? Signals sent to the process group before SIGKILL
+---@field memory_limit "auto"|number|false? RSS in bytes above which a command is terminated; "auto" is min(25 % RAM, 8 GiB)
 ---@field nice integer|false? CPU niceness of commands, within [0, 19]; `false` runs them at Neovim's priority
 ---@field oom_score_adj integer|false? Linux only: OOM-killer score of commands; `false` leaves it alone
 ---@field timeout_default number? Seconds a command may run when the call passes no `timeout`
@@ -53,6 +54,18 @@ local function size(n)
         end
     end
     return ("%d bytes"):format(n)
+end
+
+--- A memory size as people read it: whole MiB below 1 GiB, else GiB with at
+--- most two decimals.
+---@param n number Bytes
+---@return string
+local function mem_size(n)
+    local GiB = 1024 * 1024 * 1024
+    if n < GiB then
+        return ("%.0f MiB"):format(n / (1024 * 1024))
+    end
+    return (("%.2f"):format(n / GiB):gsub("%.?0+$", "")) .. " GiB"
 end
 
 --- The timeout a call runs under, in seconds; `0` means none. An absent
@@ -154,8 +167,16 @@ function M.description()
             size(config().capture_bytes or exec.DEFAULT_CAPTURE_BYTES)
         ),
     }
-    if exec.resolve_nice(config().nice) then
+    local nice = exec.resolve_nice(config().nice)
+    local memory_limit = exec.resolve_memory_limit(config().memory_limit)
+    if nice and memory_limit then
+        lines[#lines + 1] = ("- Commands run at reduced CPU priority and are terminated if their memory use exceeds %s."):format(
+            mem_size(memory_limit)
+        )
+    elseif nice then
         lines[#lines + 1] = "- Commands run at reduced CPU priority."
+    elseif memory_limit then
+        lines[#lines + 1] = ("- Commands are terminated if their memory use exceeds %s."):format(mem_size(memory_limit))
     end
     return table.concat(lines, "\n")
 end
@@ -207,6 +228,15 @@ function M.format_result(job, clamped_from)
             parts,
             ("Timed out after %s and was terminated%s; pass a larger `timeout` if the command is expected to run longer.\n"):format(
                 seconds(job.timeout_ms / 1000),
+                job.last_signal and (" (%s)"):format(job.last_signal:upper()) or ""
+            )
+        )
+    elseif job.reason == "memory" then
+        table.insert(
+            parts,
+            ("Killed: memory use %s exceeded the %s limit%s.\n"):format(
+                mem_size(job.memory_peak),
+                mem_size(job.memory_limit),
                 job.last_signal and (" (%s)"):format(job.last_signal:upper()) or ""
             )
         )
@@ -270,10 +300,11 @@ function M.handler(req, res)
         kill_ladder = config().kill_ladder,
         nice = config().nice,
         oom_score_adj = config().oom_score_adj,
+        memory_limit = config().memory_limit,
         timeout_ms = timeout > 0 and math.max(1, math.min(math.floor(timeout * 1000 + 0.5), MAX_TIMER_MS)) or nil,
         on_exit = function(job)
             local text = M.format_result(job, clamped_from)
-            if job.reason == "timeout" then
+            if job.reason == "timeout" or job.reason == "memory" then
                 res:error(text)
             else
                 res:text(text):send()
