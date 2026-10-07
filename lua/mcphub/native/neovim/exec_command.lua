@@ -87,6 +87,45 @@ function M.confirm_if(args)
     end
 end
 
+--- Display cells the label's command may take; the full command is in the
+--- folded block below the label.
+local LABEL_CELLS = 120
+
+--- The command as one line of at most `LABEL_CELLS` cells, since
+--- CodeCompanion's tool label is a single buffer line.
+---@param command string
+---@return string
+local function one_line(command)
+    local line = vim.trim(command):gsub("\r?\n", " ⏎ "):gsub("%s+", " ")
+    if vim.fn.strdisplaywidth(line) <= LABEL_CELLS then
+        return line
+    end
+    local kept, width = {}, 0
+    for _, char in ipairs(vim.fn.split(line, "\\zs")) do
+        width = width + vim.fn.strdisplaywidth(char)
+        if width > LABEL_CELLS - 1 then
+            break
+        end
+        kept[#kept + 1] = char
+    end
+    return table.concat(kept) .. "…"
+end
+
+--- The command, shown after the tool's name on its CodeCompanion label from
+--- the moment it starts.
+---@param args table The call's arguments
+---@return string
+function M.label(args)
+    return "$ " .. one_line(args.command)
+end
+
+--- The verbatim command, written as a folded code block below the label.
+---@param args table The call's arguments
+---@return { lang: string, text: string }
+function M.label_block(args)
+    return { lang = "sh", text = args.command }
+end
+
 ---@return string
 function M.description()
     local default, soft = timeouts()
@@ -252,6 +291,8 @@ M.definition = {
     name = "execute_command",
     description = M.description,
     inputSchema = M.input_schema,
+    label = M.label,
+    label_block = M.label_block,
     confirm_if = M.confirm_if,
     call_noun = "command",
     cwd_param = "cwd",

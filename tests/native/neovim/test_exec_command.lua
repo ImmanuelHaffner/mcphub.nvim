@@ -208,4 +208,20 @@ T["definition"]["renders the description and schema from the config"] = function
     eq(vim.tbl_contains(schema.required, "timeout"), false)
 end
 
+T["definition"]["labels the call with the command on one line"] = function()
+    eq(exec_command.label({ command = "a\nb" }), "$ a ⏎ b")
+    eq(
+        exec_command.label({ command = "  for f in *;\n\tdo  echo $f;\r\ndone\n" }),
+        "$ for f in *; ⏎ do echo $f; ⏎ done"
+    )
+    local label = exec_command.label({ command = ("ä"):rep(300) })
+    eq(vim.fn.strdisplaywidth(label), 122)
+    eq(vim.endswith(label, "ä…"), true)
+end
+
+T["definition"]["keeps the verbatim command for the folded block"] = function()
+    local command = "cat <<EOF\n  hi\nEOF"
+    eq(exec_command.label_block({ command = command }), { lang = "sh", text = command })
+end
+
 return T

@@ -103,7 +103,7 @@ end
 ---@param server_name string?
 ---@param tool_name string?
 ---@return MCPTool?
-local function find_native_tool(server_name, tool_name)
+function M.find_native_tool(server_name, tool_name)
     local server = server_name and native.is_native_server(server_name)
     if not server then
         return nil
@@ -123,7 +123,7 @@ end
 ---@param arguments table
 ---@return string? reason
 function M.forced_confirmation_reason(server_name, tool_name, arguments)
-    local tool = find_native_tool(server_name, tool_name)
+    local tool = M.find_native_tool(server_name, tool_name)
     return tool and confirmation.reason(tool, arguments) or nil
 end
 
@@ -283,7 +283,7 @@ end
 ---@param parsed_params MCPHub.ParsedParams
 ---@return MCPHub.DeclineContext
 local function decline_context(parsed_params)
-    local tool = find_native_tool(parsed_params.server_name, parsed_params.tool_name) or {}
+    local tool = M.find_native_tool(parsed_params.server_name, parsed_params.tool_name) or {}
     local arguments = parsed_params.arguments or {}
     local timeout = tool.timeout_param and arguments[tool.timeout_param]
     return {

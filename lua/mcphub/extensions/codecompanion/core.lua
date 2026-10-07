@@ -1,8 +1,10 @@
 local M = {}
 local async = require("plenary.async")
+local exec_ui = require("mcphub.extensions.codecompanion.exec_ui")
 local fence = require("mcphub.utils.fence")
 local shared = require("mcphub.extensions.shared")
 local size_guard = require("mcphub.extensions.codecompanion.size_guard")
+local utils = require("mcphub.utils")
 
 --- Core MCP tool execution logic
 ---@param params MCPHub.ToolCallArgs | MCPHub.ResourceAccessArgs
@@ -22,6 +24,9 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
                 data = table.concat(parsed_params.errors, "\n"),
             })
         end
+
+        -- Before the approval gate, so the command is in the chat while the window is open.
+        exec_ui.show_command(tools, parsed_params)
 
         local result = shared.handle_auto_approval_decision(parsed_params)
 
@@ -156,9 +161,32 @@ end
 ---@param display_name string
 ---@param has_function_calling boolean
 ---@param opts MCPHub.Extensions.CodeCompanionConfig
----@return {error: function, success: function}
-function M.create_output_handlers(display_name, has_function_calling, opts)
+---@param identity? { server_name: string, tool_name: string } Set for an individual tool, whose `self.args` are the tool's own arguments
+---@return {cmd_string: function, error: function, success: function}
+function M.create_output_handlers(display_name, has_function_calling, opts, identity)
     return {
+        --- What CodeCompanion shows after the tool's name on its label: the native
+        --- tool's `label` for these arguments, if it declares one.
+        ---@param self CodeCompanion.Tools.Tool The tool object
+        ---@return string?
+        cmd_string = function(self)
+            local args = self.args or {}
+            local server_name, tool_name, arguments = args.server_name, args.tool_name, args.tool_input
+            if identity then
+                server_name, tool_name, arguments = identity.server_name, identity.tool_name, args
+            end
+            if type(arguments) == "string" then
+                local ok, decoded = utils.json_decode(arguments)
+                arguments = ok and decoded or nil
+            end
+            local tool = shared.find_native_tool(server_name, tool_name)
+            if not (tool and tool.label) then
+                return nil
+            end
+            local ok, label = pcall(tool.label, arguments or {})
+            return ok and label or nil
+        end,
+
         ---@param self CodeCompanion.Tools.Tool The tool object
         ---@param stderr table|nil The error output from the command
         ---@param meta { cmd: table, tools: CodeCompanion.Tools } Metadata with tools coordinator

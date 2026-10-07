@@ -1,5 +1,5 @@
 -- Tests for the CodeCompanion glue in mcphub.extensions.codecompanion.{tools,core}:
--- what reaches hub:call_tool after the approval gate.
+-- the tool label, and what reaches hub:call_tool after the approval gate.
 --
 -- Run with `make test`, or just this file with
 -- `make test_file FILE=tests/extensions/codecompanion/test_exec_glue.lua`.
@@ -153,6 +153,37 @@ T["register_job"]["reaches the caller from an individual tool"] = function()
     local register_job = run_cmd(tool, { command = "ls", cwd = "/tmp" })
     eq(#called, 1)
     eq(called[1].caller.register_job, register_job)
+end
+
+T["cmd_string"] = new_set()
+
+T["cmd_string"]["labels an individual tool with its command"] = function()
+    tools.register({})
+    local config = package.loaded["codecompanion.config"]
+    local tool = config.interactions.chat.tools["neovim__execute_command"].callback()
+    eq(tool.output.cmd_string({ args = { command = "ls -la", cwd = "/tmp" } }), "$ ls -la")
+end
+
+T["cmd_string"]["labels use_mcp_tool with the command it runs"] = function()
+    local tool = tools.create_static_tools({}).use_mcp_tool.callback()
+    local input = { command = "pwd", cwd = "/tmp" }
+    local args = { server_name = "neovim", tool_name = "execute_command", tool_input = input }
+    eq(tool.output.cmd_string({ args = args }), "$ pwd")
+    args.tool_input = vim.json.encode(input)
+    eq(tool.output.cmd_string({ args = args }), "$ pwd")
+end
+
+T["cmd_string"]["is nil for a tool without a label"] = function()
+    native.is_native_server = function(name)
+        return name == "neovim" and { capabilities = { tools = { { name = "plain" } } } } or nil
+    end
+    local output = core.create_output_handlers(
+        "neovim__plain",
+        true,
+        {},
+        { server_name = "neovim", tool_name = "plain" }
+    )
+    eq(output.cmd_string({ args = {} }), nil)
 end
 
 return T

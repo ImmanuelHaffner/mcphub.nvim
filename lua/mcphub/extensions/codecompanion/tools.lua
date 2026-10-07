@@ -293,7 +293,12 @@ function M.register(opts)
                                 cmds = {
                                     create_individual_tool_handler(server.name, tool_name, namespaced_tool_name),
                                 },
-                                output = core.create_output_handlers(namespaced_tool_name, true, opts),
+                                output = core.create_output_handlers(
+                                    namespaced_tool_name,
+                                    true,
+                                    opts,
+                                    { server_name = server.name, tool_name = tool_name }
+                                ),
                                 schema = {
                                     type = "function",
                                     ["function"] = {
