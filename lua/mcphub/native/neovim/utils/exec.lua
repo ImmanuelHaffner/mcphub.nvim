@@ -78,6 +78,42 @@ function M.resolve_ladder(ladder)
     return ladder
 end
 
+--- Niceness and OOM-killer score commands run with by default.
+M.DEFAULT_NICE = 10
+M.DEFAULT_OOM_SCORE_ADJ = 1000
+
+--- Niceness an unprivileged process can set: going below 0 needs root, and 19
+--- is the lowest priority on Linux and macOS alike.
+local MIN_NICE, MAX_NICE = 0, 19
+
+--- The niceness commands run at: `nice` itself, clamped into [0, 19] and
+--- rounded down to an integer, or the default when absent or not a number.
+---@param nice any
+---@return integer|false level `false` runs commands at Neovim's own priority
+---@return string? warning Why `nice` was not used as given
+function M.resolve_nice(nice)
+    if nice == false then
+        return false
+    end
+    if nice == nil then
+        return M.DEFAULT_NICE
+    end
+    if type(nice) ~= "number" or nice ~= nice then
+        return M.DEFAULT_NICE, ("%s is not a number, using %d"):format(vim.inspect(nice), M.DEFAULT_NICE)
+    end
+    local level = math.min(math.max(math.floor(nice), MIN_NICE), MAX_NICE)
+    if level ~= nice then
+        return level,
+            ("%s is not an integer within [%d, %d], using %d"):format(vim.inspect(nice), MIN_NICE, MAX_NICE, level)
+    end
+    return level
+end
+
+--- Bad `nice` values already warned about, so a broken config warns once
+--- rather than on every command.
+---@type table<string, true>
+local warned_nice = {}
+
 ---@class MCPHub.Exec.Capture
 ---@field half integer Byte budget of the head and of the tail; also the longest line kept
 ---@field prefix string Prepended to every line in the log
@@ -310,20 +346,43 @@ M.Capture = Capture
 ---@field capture_bytes? integer Output kept in memory per stream
 ---@field kill_ladder? MCPHub.Exec.KillStep[] Soft steps of `terminate`; an invalid ladder falls back to the default
 ---@field timeout_ms? integer Calls `terminate("timeout")` after this long; absent or 0 means no timeout
+---@field nice? integer|false Niceness the command runs at (see `resolve_nice`); `false` keeps Neovim's
+---@field oom_score_adj? integer|false OOM-killer score on Linux; absent means the default, `false` none
 ---@field on_exit? fun(job: MCPHub.Exec.Job) Called once, after all output has been captured
 
 --- Running jobs by `jobstart` id.
 ---@type table<integer, MCPHub.Exec.Job>
 M.jobs = {}
 
---- The argv `jobstart(command)` would use, built explicitly so it can later be
---- wrapped.
+--- The argv a command is spawned with: the shell, wrapped in `nice`, and on
+--- Linux in a `sh` that marks the process for the OOM killer first. Both
+--- wrappers `exec` the next stage, so the job's pid stays its process group.
+--- The OOM write can fail (a read-only `/proc`) without stopping the command.
 ---@param command string
+---@param cfg? { nice?: integer|false, oom_score_adj?: integer|false }
+---@param sysname? string `vim.uv.os_uname().sysname`; the OOM mark applies on "Linux" only
 ---@return string[]
-function M.build_argv(command)
+function M.build_argv(command, cfg, sysname)
+    cfg = cfg or {}
     local argv = vim.split(vim.o.shell, "%s+", { trimempty = true })
     vim.list_extend(argv, vim.split(vim.o.shellcmdflag, "%s+", { trimempty = true }))
     table.insert(argv, command)
+    local nice = M.resolve_nice(cfg.nice)
+    if nice then
+        argv = vim.list_extend({ "nice", "-n", tostring(nice) }, argv)
+    end
+    local oom = cfg.oom_score_adj
+    if oom == nil then
+        oom = M.DEFAULT_OOM_SCORE_ADJ
+    end
+    if sysname == "Linux" and oom then
+        argv = vim.list_extend({
+            "sh",
+            "-c",
+            ('echo %d > /proc/self/oom_score_adj 2>/dev/null; exec "$@"'):format(oom),
+            "mcphub-exec",
+        }, argv)
+    end
     return argv
 end
 
@@ -404,6 +463,11 @@ M.Job = Job
 ---@return MCPHub.Exec.Job? job
 ---@return string? err
 function M.start(opts)
+    local _, nice_warning = M.resolve_nice(opts.nice)
+    if nice_warning and not warned_nice[nice_warning] then
+        warned_nice[nice_warning] = true
+        vim.notify("mcphub: invalid execute_command nice: " .. nice_warning, vim.log.levels.WARN)
+    end
     local log_path, fd = open_log()
     ---@type MCPHub.Exec.Job
     local job = setmetatable({
@@ -452,7 +516,7 @@ function M.start(opts)
 
     -- Neovim runs `on_exit` only after both output streams have closed, so the
     -- captures are complete by the time it fires.
-    local ok, id = pcall(vim.fn.jobstart, M.build_argv(opts.command), {
+    local ok, id = pcall(vim.fn.jobstart, M.build_argv(opts.command, opts, vim.uv.os_uname().sysname), {
         cwd = opts.cwd,
         on_stdout = function(_, data)
             on_output(job.stdout, data)

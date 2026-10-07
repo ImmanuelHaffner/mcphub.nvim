@@ -13,6 +13,8 @@ local M = {}
 ---@class MCPHub.ExecuteCommandConfig
 ---@field capture_bytes integer? Output kept in memory per stream; the rest is only in the log file
 ---@field kill_ladder MCPHub.Exec.KillStep[]? Signals sent to the process group before SIGKILL
+---@field nice integer|false? CPU niceness of commands, within [0, 19]; `false` runs them at Neovim's priority
+---@field oom_score_adj integer|false? Linux only: OOM-killer score of commands; `false` leaves it alone
 ---@field timeout_default number? Seconds a command may run when the call passes no `timeout`
 ---@field timeout_soft_limit number? Largest `timeout`, in seconds, that runs without the user's confirmation
 
@@ -129,14 +131,14 @@ end
 ---@return string
 function M.description()
     local default, soft = timeouts()
-    local shell = exec.build_argv("")
+    local shell = exec.build_argv("", { nice = false, oom_score_adj = false })
     shell[#shell] = nil
     local signals = {}
     for _, step in ipairs((exec.resolve_ladder(config().kill_ladder))) do
         signals[#signals + 1] = step[1]:upper()
     end
     signals[#signals + 1] = "SIGKILL"
-    return table.concat({
+    local lines = {
         ("Execute a shell command (`%s`) in `cwd` and return its exit code, stdout and stderr. The environment is inherited from Neovim."):format(
             table.concat(shell, " ")
         ),
@@ -151,7 +153,11 @@ function M.description()
         ("- Output larger than %s per stream is elided in the middle; the result names a log file holding the full output."):format(
             size(config().capture_bytes or exec.DEFAULT_CAPTURE_BYTES)
         ),
-    }, "\n")
+    }
+    if exec.resolve_nice(config().nice) then
+        lines[#lines + 1] = "- Commands run at reduced CPU priority."
+    end
+    return table.concat(lines, "\n")
 end
 
 ---@return table
@@ -262,6 +268,8 @@ function M.handler(req, res)
         cwd = path:absolute(),
         capture_bytes = config().capture_bytes,
         kill_ladder = config().kill_ladder,
+        nice = config().nice,
+        oom_score_adj = config().oom_score_adj,
         timeout_ms = timeout > 0 and math.max(1, math.min(math.floor(timeout * 1000 + 0.5), MAX_TIMER_MS)) or nil,
         on_exit = function(job)
             local text = M.format_result(job, clamped_from)

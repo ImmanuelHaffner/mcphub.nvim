@@ -202,10 +202,18 @@ T["definition"]["renders the description and schema from the config"] = function
     eq(description:find("Default: 45. Values up to 300 run without asking", 1, true) ~= nil, true)
     eq(description:find("receives SIGTERM, then SIGKILL;", 1, true) ~= nil, true)
     eq(description:find("larger than 1 MiB per stream", 1, true) ~= nil, true)
+    eq(description:find("Commands run at reduced CPU priority.", 1, true) ~= nil, true)
+    eq(description:find("nice -n", 1, true), nil)
     local schema = prompt_utils.get_inputSchema(exec_command.definition)
     eq(schema.properties.timeout.type, "number")
     eq(schema.properties.timeout.description:find("Default: 45. Up to 300", 1, true) ~= nil, true)
     eq(vim.tbl_contains(schema.required, "timeout"), false)
+end
+
+T["definition"]["omits the priority sentence when nice is off"] = function()
+    State.config.builtin_tools = { execute_command = { nice = false } }
+    local description = prompt_utils.get_description(exec_command.definition)
+    eq(description:find("reduced CPU priority", 1, true), nil)
 end
 
 T["definition"]["labels the call with the command on one line"] = function()

@@ -14,7 +14,7 @@ local SEQ_2M = "seq -f %.0f 1 2000000"
 
 --- Start `command` in /tmp without waiting for it.
 ---@param command string
----@param opts? { capture_bytes?: integer, kill_ladder?: MCPHub.Exec.KillStep[], timeout_ms?: integer }
+---@param opts? { capture_bytes?: integer, kill_ladder?: MCPHub.Exec.KillStep[], timeout_ms?: integer, nice?: integer|false }
 ---@return MCPHub.Exec.Job job
 ---@return fun(): MCPHub.Exec.Job? exited The job once `on_exit` has run
 local function spawn(command, opts)
@@ -25,6 +25,7 @@ local function spawn(command, opts)
         capture_bytes = opts and opts.capture_bytes,
         kill_ladder = opts and opts.kill_ladder,
         timeout_ms = opts and opts.timeout_ms,
+        nice = opts and opts.nice,
         on_exit = function(j)
             done = j
         end,
@@ -37,7 +38,7 @@ end
 
 --- Run `command` in /tmp and wait for it to exit.
 ---@param command string
----@param opts? { capture_bytes?: integer, timeout_ms?: integer }
+---@param opts? { capture_bytes?: integer, timeout_ms?: integer, nice?: integer|false }
 ---@return MCPHub.Exec.Job
 local function run(command, opts)
     local _, exited = spawn(command, opts)
@@ -317,6 +318,104 @@ T["terminate"]["falls back to the default ladder when the configured one is inva
     assert(ok, err)
     eq(notified[2], vim.log.levels.ERROR)
     eq(contains(notified[1], "sigkill"), true)
+end
+
+T["argv"] = new_set()
+
+--- The shell part of every argv, split as `build_argv` splits it.
+---@param command string
+---@return string[]
+local function shell_argv(command)
+    local argv = vim.split(vim.o.shell, "%s+", { trimempty = true })
+    vim.list_extend(argv, vim.split(vim.o.shellcmdflag, "%s+", { trimempty = true }))
+    argv[#argv + 1] = command
+    return argv
+end
+
+local PRIORITY = { nice = 10, oom_score_adj = 1000 }
+
+T["argv"]["wraps the shell in nice on macOS"] = function()
+    eq(exec.build_argv("ls", PRIORITY, "Darwin"), vim.list_extend({ "nice", "-n", "10" }, shell_argv("ls")))
+end
+
+T["argv"]["marks the command for the OOM killer on Linux"] = function()
+    eq(
+        exec.build_argv("ls", PRIORITY, "Linux"),
+        vim.list_extend({
+            "sh",
+            "-c",
+            'echo 1000 > /proc/self/oom_score_adj 2>/dev/null; exec "$@"',
+            "mcphub-exec",
+            "nice",
+            "-n",
+            "10",
+        }, shell_argv("ls"))
+    )
+end
+
+T["argv"]["drops a wrapper set to false and defaults an absent one"] = function()
+    eq(exec.build_argv("ls", { nice = false, oom_score_adj = false }, "Linux"), shell_argv("ls"))
+    eq(exec.build_argv("ls", nil, "Darwin"), vim.list_extend({ "nice", "-n", "10" }, shell_argv("ls")))
+end
+
+T["argv"]["clamps nice into [0, 19]"] = function()
+    eq({ exec.resolve_nice(10) }, { 10 })
+    eq({ exec.resolve_nice(false) }, { false })
+    eq({ exec.resolve_nice(nil) }, { exec.DEFAULT_NICE })
+    local level, warning = exec.resolve_nice(-5)
+    eq(level, 0)
+    eq(contains(assert(warning), "-5"), true)
+    eq((exec.resolve_nice(25)), 19)
+    eq((exec.resolve_nice(10.5)), 10)
+    level, warning = exec.resolve_nice("10")
+    eq(level, exec.DEFAULT_NICE)
+    eq(warning ~= nil, true)
+    eq(exec.build_argv("ls", { nice = -5, oom_score_adj = false }, "Darwin")[3], "0")
+end
+
+T["priority"] = new_set()
+
+T["priority"]["runs the command at the configured niceness"] = function()
+    local job = spawn("echo ready; sleep 2")
+    wait_ready(job)
+    eq(vim.trim(vim.fn.system({ "ps", "-o", "ni=", "-p", tostring(job.pid) })), "10")
+end
+
+T["priority"]["marks the command for the OOM killer on Linux"] = function()
+    if vim.uv.os_uname().sysname ~= "Linux" then
+        MiniTest.skip("oom_score_adj exists on Linux only")
+    end
+    local job = spawn("echo ready; sleep 2")
+    wait_ready(job)
+    eq(vim.trim(vim.fn.readfile(("/proc/%d/oom_score_adj"):format(job.pid))[1]), "1000")
+end
+
+T["priority"]["warns once about an invalid nice and runs clamped"] = function()
+    local notify, notified = vim.notify, {}
+    vim.notify = function(msg, level)
+        notified[#notified + 1] = { msg, level }
+    end
+    local ok, err = pcall(function()
+        for _ = 1, 2 do
+            eq(vim.trim(run("ps -o ni= -p $$", { nice = -7 }).stdout:text()), "0")
+        end
+    end)
+    vim.notify = notify
+    assert(ok, err)
+    eq(#notified, 1)
+    eq(notified[1][2], vim.log.levels.WARN)
+    eq(contains(notified[1][1], "-7"), true)
+end
+
+T["priority"]["still kills the whole process group"] = function()
+    local job, exited = spawn([[echo ready; sleep 103 | cat]], { kill_ladder = SHORT_LADDER })
+    wait_ready(job)
+    eq(pgrep("sleep 103"), true)
+    job:terminate("stopped")
+    vim.wait(1000, function()
+        return exited() ~= nil
+    end, 10)
+    eq(pgrep("sleep 103"), false)
 end
 
 T["validate_ladder"] = new_set()
