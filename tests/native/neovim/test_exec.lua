@@ -71,6 +71,14 @@ local function pgrep(pattern)
     return vim.v.shell_error == 0
 end
 
+--- Niceness of this test process. `nice -n` adds to the caller's niceness,
+--- so a suite started from an already niced shell must not expect absolute
+--- levels.
+---@return integer
+local function base_nice()
+    return assert(tonumber(vim.fn.system({ "ps", "-o", "ni=", "-p", tostring(vim.fn.getpid()) })))
+end
+
 ---@type MCPHub.Exec.KillStep[]
 local SHORT_LADDER = { { "sigint", 200 }, { "sigterm", 200 } }
 
@@ -378,7 +386,12 @@ T["priority"] = new_set()
 T["priority"]["runs the command at the configured niceness"] = function()
     local job = spawn("echo ready; sleep 2")
     wait_ready(job)
-    eq(vim.trim(vim.fn.system({ "ps", "-o", "ni=", "-p", tostring(job.pid) })), "10")
+    -- The kernel caps niceness at PRIO_MAX: 20 on macOS, 19 on Linux.
+    local prio_max = vim.uv.os_uname().sysname == "Darwin" and 20 or 19
+    eq(
+        vim.trim(vim.fn.system({ "ps", "-o", "ni=", "-p", tostring(job.pid) })),
+        tostring(math.min(base_nice() + 10, prio_max))
+    )
 end
 
 T["priority"]["marks the command for the OOM killer on Linux"] = function()
@@ -397,7 +410,7 @@ T["priority"]["warns once about an invalid nice and runs clamped"] = function()
     end
     local ok, err = pcall(function()
         for _ = 1, 2 do
-            eq(vim.trim(run("ps -o ni= -p $$", { nice = -7 }).stdout:text()), "0")
+            eq(vim.trim(run("ps -o ni= -p $$", { nice = -7 }).stdout:text()), tostring(base_nice()))
         end
     end)
     vim.notify = notify
