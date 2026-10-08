@@ -200,11 +200,13 @@ function M.create_output_handlers(display_name, has_function_calling, opts, iden
                 err_data = vim.inspect(err_data)
             end
             local formatted_name = opts.format_tool and opts.format_tool(display_name, self) or display_name
+            -- No trailing newline: CodeCompanion folds every line of a tool's output,
+            -- and a trailing blank one would pull the separator before the next tool
+            -- into the fold, hiding what hangs off it.
             local err_msg = string.format(
                 [[**`%s` Tool**: Failed with the following error:
 
-%s
-]],
+%s]],
                 formatted_name,
                 fence.code_block(err_data)
             )

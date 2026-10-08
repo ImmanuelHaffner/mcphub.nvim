@@ -204,4 +204,21 @@ T["cmd_string"]["is nil for a tool without a label"] = function()
     eq(output.cmd_string({ args = {} }), nil)
 end
 
+T["error output"] = new_set()
+
+T["error output"]["ends on its closing fence"] = function()
+    local written
+    local chat = {
+        add_tool_output = function(_, _, for_llm, for_user)
+            written = { for_llm, for_user }
+        end,
+    }
+    local output = core.create_output_handlers("neovim__execute_command", true, {})
+    output.error({}, { "Timed out after 1 s" }, { tools = { chat = chat } })
+    -- A trailing blank line would join CodeCompanion's fold over the output and
+    -- take the separator before the next tool, with its progress line, along.
+    eq(written[1], written[2])
+    eq(written[1]:match("Timed out after 1 s\n`+$") ~= nil, true)
+end
+
 return T
