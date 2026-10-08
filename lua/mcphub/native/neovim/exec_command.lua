@@ -13,6 +13,7 @@ local M = {}
 ---@class MCPHub.ExecuteCommandConfig
 ---@field capture_bytes integer? Output kept in memory per stream; the rest is only in the log file
 ---@field kill_ladder MCPHub.Exec.KillStep[]? Signals sent to the process group before SIGKILL
+---@field keys { cancel: string? }? Keys on a command's label in a CodeCompanion chat
 ---@field memory_limit "auto"|number|false? RSS in bytes above which a command is terminated; "auto" is min(25 % RAM, 8 GiB)
 ---@field nice integer|false? CPU niceness of commands, within [0, 19]; `false` runs them at Neovim's priority
 ---@field oom_score_adj integer|false? Linux only: OOM-killer score of commands; `false` leaves it alone
@@ -231,6 +232,17 @@ function M.format_result(job, clamped_from)
                 job.last_signal and (" (%s)"):format(job.last_signal:upper()) or ""
             )
         )
+    elseif job.reason == "cancelled" then
+        local lines = job.stats.out_lines
+        table.insert(
+            parts,
+            ("Cancelled by the user after %d s%s. Partial output (%s%s):\n"):format(
+                math.floor(((job.ended_at or vim.uv.now()) - job.started_at) / 1000),
+                job.last_signal and (" (%s)"):format(job.last_signal:upper()) or "",
+                lines == 1 and "1 line" or ("%d lines"):format(lines),
+                job.log_path and (", full log at " .. job.log_path) or ""
+            )
+        )
     end
     vim.list_extend(parts, {
         "Command: " .. job.command .. "\n",
@@ -295,7 +307,7 @@ function M.handler(req, res)
         timeout_ms = timeout > 0 and math.max(1, math.min(math.floor(timeout * 1000 + 0.5), MAX_TIMER_MS)) or nil,
         on_exit = function(job)
             local text = M.format_result(job, clamped_from)
-            if job.reason == "timeout" or job.reason == "memory" then
+            if job.reason == "timeout" or job.reason == "memory" or job.reason == "cancelled" then
                 res:error(text)
             else
                 res:text(text):send()

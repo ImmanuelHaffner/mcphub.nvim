@@ -99,6 +99,9 @@ local defaults = {
             -- "auto": min(25 % of RAM, 8 GiB); false: no limit.
             memory_limit = "auto",
             refresh_ms = 500, -- How often the progress line above a running command's fold is redrawn, in ms
+            keys = {
+                cancel = "<LocalLeader>k", -- In a CodeCompanion chat, on a running command's label: cancel that command
+            },
         },
     },
     --- Custom function to parse json file (e.g `require'json5'.parse` from `https://github.com/Joakker/lua-json5 to parse json5 syntax for .vscode/mcp.json like files)

@@ -228,6 +228,24 @@ T["on_job"]["a failing on_job does not fail the command"] = function()
     eq(result.isError, nil)
 end
 
+T["cancel"] = new_set()
+
+T["cancel"]["reports the cancellation with the partial output"] = function()
+    local wait = start({ command = "echo before; sleep 100", cwd = "/tmp" })
+    local _, job = next(exec.jobs)
+    assert(vim.wait(2000, function()
+        return job.stats.out_lines > 0
+    end, 10))
+    job:terminate("cancelled")
+    local result = wait()
+    eq(result.isError, true)
+    local text = result.content[1].text
+    local log_path =
+        text:match("^Cancelled by the user after 0 s %(SIGINT%)%. Partial output %(1 line, full log at (%S+)%):\n")
+    eq(log_path, job.log_path)
+    eq(text:find("Output:\n\nbefore\n", 1, true) ~= nil, true)
+end
+
 T["definition"] = new_set()
 
 T["definition"]["renders the description and schema from the config"] = function()

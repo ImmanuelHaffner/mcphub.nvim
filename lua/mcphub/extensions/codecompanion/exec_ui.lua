@@ -232,6 +232,7 @@ M.registry = {}
 
 ---@class MCPHub.ExecUI.Progress
 ---@field bufnr integer
+---@field key integer Extmark on the label row, which keys the job in `M.registry`
 ---@field mark integer Extmark carrying the progress line
 ---@field job MCPHub.Exec.Job
 
@@ -242,6 +243,49 @@ local live = {}
 
 ---@type uv.uv_timer_t?
 local ticker
+
+local DEFAULT_CANCEL_KEY = "<LocalLeader>k"
+
+---@return string lhs
+local function cancel_key()
+    local cfg = (State.config.builtin_tools or {}).execute_command or {}
+    return (cfg.keys or {}).cancel or DEFAULT_CANCEL_KEY
+end
+
+--- The row a command's keys act on, 0-based: the cursor's, or the first row of
+--- the closed fold the cursor is in, which for a command is its label's. The
+--- cursor stays inside a fold that is closed around it, as `zc` does.
+---@param win integer
+---@return integer
+local function cursor_row(win)
+    local row = vim.api.nvim_win_get_cursor(win)[1]
+    local first = vim.api.nvim_win_call(win, function()
+        return vim.fn.foldclosed(row)
+    end)
+    return (first ~= -1 and first or row) - 1
+end
+
+--- The job whose label is on `row`.
+---@param bufnr integer
+---@param row integer 0-based
+---@return MCPHub.Exec.Job?
+local function job_at(bufnr, row)
+    local jobs = M.registry[bufnr]
+    if not jobs then
+        return nil
+    end
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, M.NS, { row, 0 }, { row, -1 }, {})) do
+        if jobs[mark[1]] then
+            return jobs[mark[1]]
+        end
+    end
+end
+
+---@param job MCPHub.Exec.Job
+---@return boolean
+local function cancellable(job)
+    return not (job.exited or job.terminating)
+end
 
 ---@param n integer
 ---@return string
@@ -263,8 +307,9 @@ end
 --- otherwise be the only sign of.
 ---@param job MCPHub.Exec.Job
 ---@param now integer `vim.uv.now()`
+---@param hint? string The cancel key, shown while the cursor is on the command's label
 ---@return string[][] chunks
-function M.render(job, now)
+function M.render(job, now, hint)
     if job.exited then
         local ran = (job.ended_at or now) - job.started_at
         local text
@@ -292,7 +337,26 @@ function M.render(job, now)
         parts[#parts + 1] = "RSS " .. exec.mem_size(stats.rss_bytes)
     end
     parts[#parts + 1] = ("idle %ds"):format(math.floor((now - (stats.last_output_at or job.started_at)) / 1000))
+    if hint then
+        parts[#parts + 1] = hint .. " cancel"
+    end
     return { { table.concat(parts, " · "), "Comment" } }
+end
+
+--- The cancel key to show on `entry`'s line: while its job can be cancelled
+--- and the current window's cursor is on its label.
+---@param entry MCPHub.ExecUI.Progress
+---@return string?
+local function hint(entry)
+    local win = vim.api.nvim_get_current_win()
+    if not cancellable(entry.job) or vim.api.nvim_win_get_buf(win) ~= entry.bufnr then
+        return nil
+    end
+    local pos = vim.api.nvim_buf_get_extmark_by_id(entry.bufnr, M.NS, entry.key, {})
+    if pos[1] ~= cursor_row(win) then
+        return nil
+    end
+    return vim.fn.keytrans(vim.keycode(cancel_key()))
 end
 
 ---@param entry MCPHub.ExecUI.Progress
@@ -308,7 +372,7 @@ local function draw(entry, now)
     end
     vim.api.nvim_buf_set_extmark(entry.bufnr, M.NS, pos[1], 0, {
         id = entry.mark,
-        virt_lines = { M.render(entry.job, now) },
+        virt_lines = { M.render(entry.job, now, hint(entry)) },
     })
     return true
 end
@@ -340,9 +404,55 @@ local function start_ticker()
     ticker:start(interval, interval, vim.schedule_wrap(tick))
 end
 
---- Register `job` under its tool's label and show its progress line directly
---- above the label. Does nothing against a CodeCompanion without
---- `get_tool_label`.
+---@param bufnr integer
+local function redraw(bufnr)
+    local now = vim.uv.now()
+    for _, entry in ipairs(live) do
+        if entry.bufnr == bufnr then
+            draw(entry, now)
+        end
+    end
+end
+
+--- Cancel the running command whose label the cursor of `win` is on. Off a
+--- label, or on a command that has finished or is terminating already, do
+--- nothing at all.
+---@param win integer
+local function cancel(win)
+    local bufnr = vim.api.nvim_win_get_buf(win)
+    local job = job_at(bufnr, cursor_row(win))
+    if job and cancellable(job) then
+        job:terminate("cancelled")
+        redraw(bufnr)
+    end
+end
+
+--- Map the cancel key in the chat, and let the progress lines' cancel hint
+--- follow the cursor. Once per buffer.
+---@param bufnr integer
+local function setup_buffer(bufnr)
+    if vim.b[bufnr].mcphub_exec_keys then
+        return
+    end
+    vim.b[bufnr].mcphub_exec_keys = true
+    vim.keymap.set("n", cancel_key(), function()
+        cancel(vim.api.nvim_get_current_win())
+    end, { buffer = bufnr, desc = "Cancel the command on this label" })
+    vim.api.nvim_create_autocmd({ "CursorMoved", "WinLeave", "BufLeave" }, {
+        group = vim.api.nvim_create_augroup("mcphub_exec_ui_hint", { clear = false }),
+        buffer = bufnr,
+        callback = function()
+            -- Scheduled, so that on leaving, the window entered decides.
+            vim.schedule(function()
+                redraw(bufnr)
+            end)
+        end,
+    })
+end
+
+--- Register `job` under its tool's label, where the cancel key finds it, and
+--- show its progress line directly above the label. Does nothing against a
+--- CodeCompanion without `get_tool_label`.
 ---@param tools table CodeCompanion's tools coordinator
 ---@param job MCPHub.Exec.Job
 function M.attach(tools, job)
@@ -365,7 +475,8 @@ function M.attach(tools, job)
     local mark = vim.api.nvim_buf_set_extmark(bufnr, M.NS, row - 1, 0, {
         virt_lines = { M.render(job, vim.uv.now()) },
     })
-    table.insert(live, { bufnr = bufnr, mark = mark, job = job })
+    table.insert(live, { bufnr = bufnr, key = key, mark = mark, job = job })
+    setup_buffer(bufnr)
     start_ticker()
 end
 

@@ -7,6 +7,7 @@ local new_set = MiniTest.new_set
 local eq = MiniTest.expect.equality
 
 local State = require("mcphub.state")
+local exec = require("mcphub.native.neovim.utils.exec")
 local exec_command = require("mcphub.native.neovim.exec_command")
 local exec_ui = require("mcphub.extensions.codecompanion.exec_ui")
 local native = require("mcphub.native")
@@ -151,6 +152,58 @@ local function progress_marks()
     return found
 end
 
+--- Real jobs a case started; `post_case` stops those still running.
+---@type MCPHub.Exec.Job[]
+local started = {}
+
+--- Start a real command under a short ladder, attached to the chat's label.
+---@param command string
+---@return MCPHub.Exec.Job
+local function attach_command(command)
+    local job = assert(exec.start({
+        command = command,
+        cwd = "/tmp",
+        kill_ladder = { { "sigint", 200 }, { "sigterm", 200 } },
+    }))
+    table.insert(started, job)
+    exec_ui.attach(fake_tools(), job)
+    return job
+end
+
+---@param job MCPHub.Exec.Job
+---@return boolean exited
+local function wait_exit(job)
+    return vim.wait(5000, function()
+        return job.exited
+    end, 10)
+end
+
+--- Put the chat's cursor on a 1-based row and press the cancel key there.
+---@param row integer
+local function press_cancel(row)
+    vim.api.nvim_win_set_cursor(chat.win, { row, 0 })
+    vim.api.nvim_feedkeys(vim.keycode("<LocalLeader>k"), "x", false)
+end
+
+local HINT = " · " .. vim.fn.keytrans(vim.keycode("<LocalLeader>k")) .. " cancel"
+
+---@return boolean
+local function hinted()
+    return vim.endswith(progress_marks().text[1], HINT)
+end
+
+--- Put the chat's cursor on a 1-based row, then wait for the progress line to
+--- show or drop the cancel hint.
+---@param row integer
+---@param shown boolean
+---@return boolean
+local function hint_follows(row, shown)
+    vim.api.nvim_win_set_cursor(chat.win, { row, 0 })
+    return vim.wait(1000, function()
+        return hinted() == shown
+    end, 10)
+end
+
 local T = new_set({
     hooks = {
         pre_case = function()
@@ -178,6 +231,14 @@ local T = new_set({
         end,
         post_case = function()
             native.is_native_server = real.is_native_server
+            if real.notify then
+                vim.notify, real.notify = real.notify, nil
+            end
+            for _, job in ipairs(started) do
+                job:terminate("stopped")
+                wait_exit(job)
+            end
+            started = {}
             for name, module in pairs(real.modules) do
                 package.loaded[name] = module or nil
             end
@@ -339,6 +400,86 @@ T["progress line"]["shows how the job ended, then stops redrawing"] = function()
         true
     )
     eq(progress_marks().text, { "1.5s · exit 0" })
+end
+
+T["cancel key"] = new_set()
+
+T["cancel key"]["cancels the command on its label"] = function()
+    local job = attach_command("sleep 100")
+    press_cancel(LABEL_ROW)
+    eq(job.reason, "cancelled")
+    eq(wait_exit(job), true)
+end
+
+T["cancel key"]["cancels from inside the label's closed fold"] = function()
+    show()
+    local job = attach_command("sleep 100")
+    press_cancel(LABEL_ROW + 2)
+    eq(fold(LABEL_ROW + 2), { LABEL_ROW, FENCE_ROW })
+    eq(job.reason, "cancelled")
+end
+
+T["cancel key"]["does nothing off the label"] = function()
+    local notified = 0
+    real.notify = vim.notify
+    vim.notify = function()
+        notified = notified + 1
+    end
+    local job = attach_command("sleep 100")
+    -- The row above the label, which carries the progress line.
+    press_cancel(LABEL_ROW - 1)
+    eq(job.terminating, false)
+    eq(notified, 0)
+end
+
+T["cancel key"]["does nothing on a finished command"] = function()
+    local job = attach_command("true")
+    eq(wait_exit(job), true)
+    press_cancel(LABEL_ROW)
+    eq(job.terminating, false)
+    eq(job.reason, nil)
+end
+
+T["cancel key"]["pressing again leaves the ladder alone"] = function()
+    local job = attach_command("trap '' INT TERM; echo ready; sleep 100")
+    -- Once the trap is set, only SIGKILL ends the group.
+    eq(
+        vim.wait(2000, function()
+            return job.stats.out_lines > 0
+        end, 10),
+        true
+    )
+    press_cancel(LABEL_ROW)
+    eq(job.last_signal, "sigint")
+    press_cancel(LABEL_ROW)
+    eq(job.last_signal, "sigint")
+    eq(
+        vim.wait(1000, function()
+            return job.last_signal == "sigterm"
+        end, 5),
+        true
+    )
+    press_cancel(LABEL_ROW)
+    eq(job.last_signal, "sigterm")
+    eq(wait_exit(job), true)
+    eq(job.last_signal, "sigkill")
+end
+
+T["cancel hint"] = new_set()
+
+T["cancel hint"]["shows while the cursor is on the label or in its closed fold"] = function()
+    show()
+    attach_command("sleep 100")
+    eq(hint_follows(LABEL_ROW, true), true)
+    eq(hint_follows(LABEL_ROW - 1, false), true)
+    eq(hint_follows(LABEL_ROW + 2, true), true)
+end
+
+T["cancel hint"]["goes once the command is cancelled"] = function()
+    attach_command("sleep 100")
+    eq(hint_follows(LABEL_ROW, true), true)
+    press_cancel(LABEL_ROW)
+    eq(hinted(), false)
 end
 
 return T
