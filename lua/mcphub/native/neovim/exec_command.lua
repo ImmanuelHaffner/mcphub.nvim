@@ -13,7 +13,7 @@ local M = {}
 ---@class MCPHub.ExecuteCommandConfig
 ---@field capture_bytes integer? Output kept in memory per stream; the rest is only in the log file
 ---@field kill_ladder MCPHub.Exec.KillStep[]? Signals sent to the process group before SIGKILL
----@field keys { cancel: string? }? Keys on a command's label in a CodeCompanion chat
+---@field keys { cancel: string?, output: string[]? }? Keys on a command's label in a CodeCompanion chat
 ---@field memory_limit "auto"|number|false? RSS in bytes above which a command is terminated; "auto" is min(25 % RAM, 8 GiB)
 ---@field nice integer|false? CPU niceness of commands, within [0, 19]; `false` runs them at Neovim's priority
 ---@field oom_score_adj integer|false? Linux only: OOM-killer score of commands; `false` leaves it alone

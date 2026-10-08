@@ -482,4 +482,54 @@ T["cancel hint"]["goes once the command is cancelled"] = function()
     eq(hinted(), false)
 end
 
+T["output keys"] = new_set()
+
+---@return integer[] wins The floats in the current tab
+local function floats()
+    return vim.tbl_filter(function(win)
+        return vim.api.nvim_win_get_config(win).relative ~= ""
+    end, vim.api.nvim_tabpage_list_wins(0))
+end
+
+T["output keys"]["K on a finished command's label shows its log"] = function()
+    show()
+    local job = attach_command("echo hi")
+    eq(wait_exit(job), true)
+    vim.api.nvim_win_set_cursor(chat.win, { LABEL_ROW + 2, 0 })
+    vim.api.nvim_feedkeys("K", "x", false)
+    local win = floats()[1]
+    eq(win ~= nil, true)
+    eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false), { "hi" })
+    vim.api.nvim_win_close(win, true)
+end
+
+T["output keys"]["K off a label runs the chat's previous K"] = function()
+    local calls = 0
+    vim.keymap.set("n", "K", function()
+        calls = calls + 1
+    end, { buffer = chat.buf })
+    attach_command("sleep 100")
+    vim.api.nvim_win_set_cursor(chat.win, { 1, 0 })
+    vim.api.nvim_feedkeys("K", "x", false)
+    eq(calls, 1)
+    eq(floats(), {})
+end
+
+T["output keys"]["gO off a label runs the global gO"] = function()
+    local previous = vim.fn.maparg("gO", "n", false, true)
+    local calls = 0
+    vim.keymap.set("n", "gO", function()
+        calls = calls + 1
+    end)
+    attach_command("sleep 100")
+    vim.api.nvim_win_set_cursor(chat.win, { 1, 0 })
+    vim.api.nvim_feedkeys("gO", "x", false)
+    vim.keymap.del("n", "gO")
+    if next(previous) then
+        vim.fn.mapset("n", false, previous)
+    end
+    eq(calls, 1)
+    eq(floats(), {})
+end
+
 return T

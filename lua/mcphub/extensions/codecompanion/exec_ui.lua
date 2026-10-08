@@ -427,8 +427,30 @@ local function cancel(win)
     end
 end
 
---- Map the cancel key in the chat, and let the progress lines' cancel hint
---- follow the cursor. Once per buffer.
+local DEFAULT_OUTPUT_KEYS = { "K", "gO" }
+
+---@return string[] lhs
+local function output_keys()
+    local cfg = (State.config.builtin_tools or {}).execute_command or {}
+    return (cfg.keys or {}).output or DEFAULT_OUTPUT_KEYS
+end
+
+--- Do what `lhs` did before it was mapped in the chat: run the mapping it had,
+--- or else the key itself.
+---@param lhs string
+---@param previous table `maparg()` of `lhs` before it was mapped; empty when it had none
+local function fall_through(lhs, previous)
+    if previous.callback then
+        previous.callback()
+    elseif previous.rhs and previous.rhs ~= "" then
+        vim.api.nvim_feedkeys(vim.keycode(previous.rhs), previous.noremap == 1 and "n" or "m", false)
+    else
+        vim.api.nvim_feedkeys(vim.keycode(lhs), "n", false)
+    end
+end
+
+--- Map the cancel and output keys in the chat, and let the progress lines'
+--- cancel hint follow the cursor. Once per buffer.
 ---@param bufnr integer
 local function setup_buffer(bufnr)
     if vim.b[bufnr].mcphub_exec_keys then
@@ -438,6 +460,19 @@ local function setup_buffer(bufnr)
     vim.keymap.set("n", cancel_key(), function()
         cancel(vim.api.nvim_get_current_win())
     end, { buffer = bufnr, desc = "Cancel the command on this label" })
+    for _, lhs in ipairs(output_keys()) do
+        local previous = vim.api.nvim_buf_call(bufnr, function()
+            return vim.fn.maparg(lhs, "n", false, true)
+        end)
+        vim.keymap.set("n", lhs, function()
+            local job = job_at(bufnr, cursor_row(vim.api.nvim_get_current_win()))
+            if job then
+                require("mcphub.ui.exec_float").open(job, { footer = M.render })
+            else
+                fall_through(lhs, previous)
+            end
+        end, { buffer = bufnr, desc = "Show the output of the command on this label" })
+    end
     vim.api.nvim_create_autocmd({ "CursorMoved", "WinLeave", "BufLeave" }, {
         group = vim.api.nvim_create_augroup("mcphub_exec_ui_hint", { clear = false }),
         buffer = bufnr,

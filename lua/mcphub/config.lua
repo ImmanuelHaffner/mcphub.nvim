@@ -101,6 +101,8 @@ local defaults = {
             refresh_ms = 500, -- How often the progress line above a running command's fold is redrawn, in ms
             keys = {
                 cancel = "<LocalLeader>k", -- In a CodeCompanion chat, on a running command's label: cancel that command
+                -- In a CodeCompanion chat, on a command's label: show its output; elsewhere the keys do what they did
+                output = { "K", "gO" },
             },
         },
     },
