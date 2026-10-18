@@ -1,3 +1,4 @@
+local focus_gate = require("mcphub.native.neovim.files.edit_file.focus_gate")
 local keymap_utils = require("mcphub.native.neovim.utils.keymap")
 local text = require("mcphub.utils.text")
 
@@ -181,6 +182,8 @@ end
 ---@field config UIConfig Configuration options
 ---@field state UIState Current UI state
 ---@field highlights table Highlight management
+---@field defer MCPHub.FocusGate.Config When the review may take focus, resolved from `config.defer`
+---@field gate MCPHub.FocusGate.Handle? The gate holding an interactive review back
 local EditUI = {}
 EditUI.__index = EditUI
 
@@ -218,6 +221,12 @@ local DEFAULT_CONFIG = {
         accept_all = "ga", -- Accept all remaining changes
         reject_all = "gr", -- Reject all remaining changes
     },
+    -- `allow_in_modes` defaults to nil, never `{}`: `tbl_deep_extend` merges lists index by
+    -- index, so a default list would splice itself into the user's.
+    defer = {
+        chat = false,
+        settle_ms = 2000,
+    },
 }
 
 -- Create new EditUI instance
@@ -226,6 +235,7 @@ local DEFAULT_CONFIG = {
 function EditUI.new(config)
     local self = setmetatable({}, EditUI)
     self.config = vim.tbl_deep_extend("force", DEFAULT_CONFIG, config or {})
+    self.defer = focus_gate.resolve(self.config.defer)
     self.state = nil
     self.highlights = {
         namespace_diff = vim.api.nvim_create_namespace("mcphub-editor-diff"),
@@ -236,8 +246,20 @@ function EditUI.new(config)
 end
 
 -- Start interactive editing session
----@param opts table Session options
+---@param opts table Session options. `chat_bufnr` names the chat that asked for the edit, if any.
 function EditUI:start_interactive_editing(opts)
+    -- Auto-approved edits are never held back: there is nothing for the user to look at.
+    if opts.interactive == false then
+        return self:_open(opts)
+    end
+    self.gate = focus_gate.wait({ config = self.defer, chat_bufnr = opts.chat_bufnr }, function()
+        self:_open(opts)
+    end, opts.on_cancel)
+end
+
+-- Open the review: show the file, apply the changes and highlight them
+---@param opts table Session options, as given to `start_interactive_editing`
+function EditUI:_open(opts)
     local buf_utils = require("mcphub.native.neovim.utils.buffer")
     local bufnr = buf_utils.open_file_in_editor(opts.file_path)
     if not bufnr then
@@ -1492,6 +1514,12 @@ end
 
 -- Cleanup UI resources
 function EditUI:cleanup()
+    -- A review still held back has no state yet; dropping it must not report a cancel,
+    -- since cleanup is what the cancel path itself ends in.
+    if self.gate then
+        self.gate:close()
+        self.gate = nil
+    end
     if not self.state then
         return
     end

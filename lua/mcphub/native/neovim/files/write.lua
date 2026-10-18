@@ -1,4 +1,5 @@
 local State = require("mcphub.state")
+local focus_gate = require("mcphub.native.neovim.files.edit_file.focus_gate")
 -- Core write file logic
 local function handle_write_file(req, res)
     if not req.params.path then
@@ -18,6 +19,7 @@ local function handle_write_file(req, res)
     session:start({
         replace_file_content = content,
         interactive = req.caller.auto_approve ~= true,
+        chat_bufnr = focus_gate.chat_bufnr(req.caller),
         on_success = function(summary)
             res:text(summary):send()
         end,

@@ -219,3 +219,44 @@ describe("drive_file config delivery", function()
         cleanup_fixture(path, bufnr)
     end)
 end)
+
+describe("drive_file chat delivery", function()
+    it("hands the request's chat_bufnr to EditUI", function()
+        local path, bufnr, fp = fixture_file({ "A", "B", "C" }, "_cfg_chat.txt")
+        local response, seen
+        local real_start = edit_ui.start_interactive_editing
+        edit_ui.start_interactive_editing = function(self, opts)
+            seen = opts.chat_bufnr
+            return real_start(self, opts)
+        end
+        local ok, err = pcall(silently, function()
+            local valid, parsed = schema.validate(replace_line_2(path, fp, "B2"))
+            assert(valid, "schema validation failed: " .. vim.inspect(parsed))
+            local plan, plan_fail = planner.plan(parsed)
+            assert(plan, "planner failed: " .. vim.inspect(plan_fail))
+            -- The tool's driver, not the applier, is what sets `chat_bufnr`.
+            local driver = function(request, file_cb)
+                request.chat_bufnr = 7
+                return ui_backend.drive_file(request, file_cb)
+            end
+            applier.apply_plan(plan, { interactive = false }, driver, function(r)
+                response = r
+            end)
+            assert(
+                vim.wait(500, function()
+                    return response ~= nil
+                end, 5),
+                "apply did not complete within 500ms"
+            )
+        end)
+        edit_ui.start_interactive_editing = real_start
+        if not ok then
+            error(err, 0)
+        end
+
+        assert.is.equal(seen, 7)
+        assert.is.equal(response.status, "applied")
+
+        cleanup_fixture(path, bufnr)
+    end)
+end)

@@ -672,7 +672,7 @@ end
 --- non-mcphub embedder.
 ---
 --- @class MCPHub.ApplyEditConfig
---- @field ui table?                            Passed to `EditUI.new`. `EditUI` reads only `keybindings`, `auto_navigate` and `go_to_origin_on_complete`; its other defaults are inert here because this driver owns diagnostics reporting.
+--- @field ui table?                            Passed to `EditUI.new`. `EditUI` reads only `keybindings`, `auto_navigate`, `go_to_origin_on_complete` and `defer`; its other defaults are inert here because this driver owns diagnostics reporting.
 --- @field lsp_wait_ms table<string, integer>?  Per-client ceilings, merged *over* `M.LSP_WAIT_MS`.
 --- @field default_lsp_wait_ms integer?         Ceiling for clients with no curated entry.
 --- @field diagnostic_context_lines integer?    Context window around an edited range for in-range diagnostic detail.
@@ -873,6 +873,7 @@ function M.drive_file(request, file_cb, config)
         interactive = request.interactive ~= false,
         is_replacing_entire_file = false,
         origin_winnr = origin_winnr,
+        chat_bufnr = request.chat_bufnr,
         file_path = request.file_path,
         located_blocks = located_blocks,
         original_content = request.original_content,

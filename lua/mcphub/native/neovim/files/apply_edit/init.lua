@@ -22,6 +22,7 @@ local State = require("mcphub.state")
 local edit = require("mcphub.native.neovim.files.apply_edit.engine")
 local edit_json = require("mcphub.native.neovim.files.apply_edit.json")
 local edit_read = require("mcphub.native.neovim.files.apply_edit.read")
+local focus_gate = require("mcphub.native.neovim.files.edit_file.focus_gate")
 
 --------------------------------------------------------------------------------
 -- Anchor schemas
@@ -393,6 +394,7 @@ local apply_edit_tool = {
         -- scope, because `State.config` is empty until mcphub's `setup()` runs.
         local config = (State.config.builtin_tools or {}).apply_edit
         local auto_approve = req.caller and req.caller.auto_approve == true
+        local chat_bufnr = focus_gate.chat_bufnr(req.caller)
         -- Both the user config and `auto_approve` reach the engine through the
         -- DRIVER, never through an opts table: `edit.apply` is deliberately
         -- opts-free so that no configuration path (notably
@@ -405,6 +407,7 @@ local apply_edit_tool = {
                 -- Honour auto-approve by skipping per-hunk review.
                 request.interactive = false
             end
+            request.chat_bufnr = chat_bufnr
             return ui_backend.drive_file(request, file_cb, config)
         end
         edit.apply(req.params or {}, drive_file, function(response)

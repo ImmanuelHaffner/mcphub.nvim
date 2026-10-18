@@ -39,6 +39,12 @@ local defaults = {
                     accept_all = "ga", -- Accept all remaining changes
                     reject_all = "gr", -- Reject all remaining changes
                 },
+                ---@type UIDeferConfig
+                defer = { -- When a review may take focus; also governs `write_file`. The defaults open it at once.
+                    allow_in_modes = nil, -- Exact mode codes, e.g. { "n" }; nil: any mode
+                    chat = false, -- false | "visible" (in the current tab) | "focused": the chat that asked for it
+                    settle_ms = 2000, -- Wait this long, in ms, once a held-back review's conditions clear
+                },
             },
             feedback = {
                 include_parser_feedback = true,
@@ -59,7 +65,7 @@ local defaults = {
             -- but keeps its own settings instead of inheriting them: since
             -- `edit_file` is soft-deprecated, tying the replacement's config to
             -- it would point users at the tool they are being steered away
-            -- from. Only the three fields `EditUI` actually reads are exposed;
+            -- from. Only the four fields `EditUI` actually reads are exposed;
             -- its `send_diagnostics` / `wait_for_diagnostics` /
             -- `diagnostic_severity` defaults are inert on this path, because
             -- `apply_edit` reports diagnostics itself.
@@ -73,6 +79,12 @@ local defaults = {
                     prev = "p", -- Previous diff
                     accept_all = "ga", -- Accept all remaining changes
                     reject_all = "gr", -- Reject all remaining changes
+                },
+                ---@type UIDeferConfig
+                defer = { -- When a review may take focus. The defaults open it at once.
+                    allow_in_modes = nil, -- Exact mode codes, e.g. { "n" }; nil: any mode
+                    chat = false, -- false | "visible" (in the current tab) | "focused": the chat that asked for it
+                    settle_ms = 2000, -- Wait this long, in ms, once a held-back review's conditions clear
                 },
             },
             -- Per-client ceilings (ms) on the post-write wait for LSP

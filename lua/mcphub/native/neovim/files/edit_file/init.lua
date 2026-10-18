@@ -1,5 +1,6 @@
 local State = require("mcphub.state")
 local deprecation = require("mcphub.utils.deprecation")
+local focus_gate = require("mcphub.native.neovim.files.edit_file.focus_gate")
 
 --- Soft-deprecated in favour of `apply_edit`, which supersedes it. Still fully
 --- functional and still registered; disable it from the MCPHub UI if unwanted.
@@ -175,6 +176,7 @@ IMPORTANT: Batch multiple related changes for a file into a single call to minim
         local session = EditSession.new(params.path, params.diff, State.config.builtin_tools.edit_file)
         session:start({
             interactive = req.caller.auto_approve ~= true,
+            chat_bufnr = focus_gate.chat_bufnr(req.caller),
             on_success = function(summary)
                 res:text(summary):send()
             end,

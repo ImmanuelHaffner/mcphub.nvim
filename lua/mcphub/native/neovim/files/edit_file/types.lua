@@ -177,7 +177,13 @@ M.DIFFERENCE_TYPE = {
 ---@field accept_all string Key to accept all changes
 ---@field reject_all string Key to reject all changes
 
+---@class UIDeferConfig
+---@field allow_in_modes string[]? Exact mode codes in which a review may take focus, e.g. { "n" }; nil: any mode
+---@field chat false|"visible"|"focused"? Whether the invoking chat must be visible in the current tab, or focused
+---@field settle_ms integer? Quiet period, in ms, after a held-back review's conditions clear
+
 ---@class UIConfig
 ---@field go_to_origin_on_complete boolean Jump back to original file on completion
 ---@field keybindings UIKeybindings Custom keybindings for UI actions
+---@field defer UIDeferConfig? When an interactive review may take focus
 return M
