@@ -191,6 +191,7 @@ EditUI.__index = EditUI
 ---@class UIState
 ---@field origin_winnr integer Window number of the start
 ---@field bufnr integer Buffer number being edited
+---@field windowless boolean Whether the session works on the buffer without showing it in a window
 ---@field file_path string Path to the file
 ---@field located_blocks LocatedBlock[] Blocks to process
 ---@field original_content string Original file content
@@ -261,13 +262,21 @@ end
 ---@param opts table Session options, as given to `start_interactive_editing`
 function EditUI:_open(opts)
     local buf_utils = require("mcphub.native.neovim.utils.buffer")
-    local bufnr = buf_utils.open_file_in_editor(opts.file_path)
+    -- An auto-approved edit has nothing to show, so it never takes a window.
+    local windowless = opts.interactive == false
+    local bufnr
+    if windowless then
+        bufnr = buf_utils.load_hidden(opts.file_path)
+    else
+        bufnr = buf_utils.open_file_in_editor(opts.file_path)
+    end
     if not bufnr then
-        return opts.on_error("Couldn't open buffer for editing")
+        return (opts.on_error or opts.on_cancel)("Couldn't open buffer for editing")
     end
     self.state = {
         origin_winnr = opts.origin_winnr,
         bufnr = bufnr,
+        windowless = windowless,
         is_replacing_entire_file = opts.is_replacing_entire_file,
         file_path = opts.file_path,
         located_blocks = opts.located_blocks,
@@ -818,16 +827,21 @@ end
 
 function EditUI:write_if_modified()
     local file = self.state.file_path
-    local buf_state = vim.bo[self.state.bufnr]
+    local bufnr = self.state.bufnr
+    local buf_state = vim.bo[bufnr]
     if file and (buf_state and buf_state.modified) then
-        local ok, err = pcall(vim.cmd.write, file)
-        if not ok and err:match("E212") then
-            local dir = vim.fn.fnamemodify(file, ":h")
-            if vim.fn.isdirectory(dir) == 0 then
-                vim.fn.mkdir(dir, "p")
+        -- `:write` writes the current buffer, which need not be this one: an
+        -- auto-approved edit never shows its buffer in a window.
+        vim.api.nvim_buf_call(bufnr, function()
+            local ok, err = pcall(vim.cmd.write, file)
+            if not ok and err:match("E212") then
+                local dir = vim.fn.fnamemodify(file, ":h")
+                if vim.fn.isdirectory(dir) == 0 then
+                    vim.fn.mkdir(dir, "p")
+                end
+                vim.cmd.write(file)
             end
-            vim.cmd.write(file)
-        end
+        end)
     end
 end
 
@@ -1252,9 +1266,16 @@ function EditUI:_complete_session()
     self:write_if_modified()
     vim.schedule(function()
         local origin_winnr = self.state.origin_winnr
+        local windowless = self.state.windowless
         -- Signal completion to the session without arguments
         self.state.callbacks.on_complete()
-        if self.config.go_to_origin_on_complete and origin_winnr and vim.api.nvim_win_is_valid(origin_winnr) then
+        -- A session that never left the user's window has nothing to go back to.
+        if
+            not windowless
+            and self.config.go_to_origin_on_complete
+            and origin_winnr
+            and vim.api.nvim_win_is_valid(origin_winnr)
+        then
             pcall(vim.api.nvim_set_current_win, origin_winnr)
         end
     end)

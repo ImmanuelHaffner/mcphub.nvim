@@ -187,6 +187,22 @@ function M.find_buffer(file_path)
     return nil
 end
 
+--- Load a file into a buffer without showing it in any window. Loading runs the
+--- usual read pipeline, filetype detection included, so LSP clients still attach.
+--- A file that does not exist yet yields an empty buffer named after it.
+---@param file_path string The path to the file to load
+---@return integer|nil bufnr The loaded buffer, or nil if it could not be loaded
+function M.load_hidden(file_path)
+    local bufnr = vim.fn.bufadd(vim.fn.fnamemodify(file_path, ":p"))
+    if bufnr == 0 then
+        return nil
+    end
+    if not vim.api.nvim_buf_is_loaded(bufnr) and not pcall(vim.fn.bufload, bufnr) then
+        return nil
+    end
+    return bufnr
+end
+
 ---Open file in editor and get target window
 ---@param file_path string The path to the file to open
 ---@return number|nil The buffer number of the opened file, or nil if not found
