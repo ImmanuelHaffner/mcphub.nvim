@@ -203,6 +203,30 @@ function M.load_hidden(file_path)
     return bufnr
 end
 
+--- A buffer's content as the bytes `:write` would produce, `'fileformat'` aside: lines
+--- joined by `\n`, with a final `\n` iff `'endofline'` is set. `apply_edit` fingerprints
+--- this string, so anything comparing against a fingerprinted read must use it too.
+---@param bufnr integer A loaded buffer
+---@return string content
+---@return boolean endofline
+function M.normalised_content(bufnr)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local endofline = vim.bo[bufnr].endofline
+    local content = table.concat(lines, "\n")
+    if endofline and #lines > 0 then
+        content = content .. "\n"
+    end
+    return content, endofline
+end
+
+--- Full sha256 of `normalised_content(bufnr)`. Comparing content rather than
+--- `changedtick` means an edit that was undone again counts as no change.
+---@param bufnr integer A loaded buffer
+---@return string hash 64 lowercase hex characters
+function M.content_hash(bufnr)
+    return vim.fn.sha256((M.normalised_content(bufnr)))
+end
+
 ---Open file in editor and get target window
 ---@param file_path string The path to the file to open
 ---@return number|nil The buffer number of the opened file, or nil if not found

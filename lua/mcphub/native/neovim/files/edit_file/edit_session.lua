@@ -165,6 +165,10 @@ function EditSession:start(options)
     local EditUI = require("mcphub.native.neovim.files.edit_file.edit_ui")
     self.ui = EditUI.new(self.config.ui)
 
+    -- Snapshot the target now, while it still holds what the blocks were located in;
+    -- a review may open later, and must not apply to content that changed meanwhile.
+    local target_bufnr = buf_utils.load_hidden(self.file_path)
+
     self.ui:start_interactive_editing({
         interactive = options.interactive ~= false,
         is_replacing_entire_file = is_replacing_entire_file,
@@ -173,6 +177,16 @@ function EditSession:start(options)
         file_path = self.file_path,
         located_blocks = self.located_blocks,
         original_content = file_content,
+        reference_hash = target_bufnr and buf_utils.content_hash(target_bufnr),
+        on_stale = function()
+            self.ui:cleanup()
+            self:_handle_error(
+                string.format(
+                    "`%s` changed before the edit could be applied. Re-read the file and retry.",
+                    self.file_path
+                )
+            )
+        end,
         on_complete = function()
             self:_generate_final_report(false, function(report)
                 self.callbacks.on_success("# EDIT SESSION\n\n" .. report)

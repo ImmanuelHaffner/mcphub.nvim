@@ -248,6 +248,8 @@ end
 
 -- Start interactive editing session
 ---@param opts table Session options. `chat_bufnr` names the chat that asked for the edit, if any.
+---  `reference_hash` is the `content_hash` the blocks were located against; when the target no
+---  longer matches it, nothing is applied and `on_stale(live_content)` (or `on_cancel`) is called.
 function EditUI:start_interactive_editing(opts)
     -- Auto-approved edits are never held back: there is nothing for the user to look at.
     if opts.interactive == false then
@@ -262,12 +264,17 @@ end
 ---@param opts table Session options, as given to `start_interactive_editing`
 function EditUI:_open(opts)
     local buf_utils = require("mcphub.native.neovim.utils.buffer")
+    -- Loaded without a window first, so that a stale target is refused before it is shown.
+    local bufnr = buf_utils.load_hidden(opts.file_path)
+    if bufnr and opts.reference_hash and buf_utils.content_hash(bufnr) ~= opts.reference_hash then
+        if opts.on_stale then
+            return opts.on_stale((buf_utils.normalised_content(bufnr)))
+        end
+        return opts.on_cancel("`" .. opts.file_path .. "` changed before the edit could be applied.")
+    end
     -- An auto-approved edit has nothing to show, so it never takes a window.
     local windowless = opts.interactive == false
-    local bufnr
-    if windowless then
-        bufnr = buf_utils.load_hidden(opts.file_path)
-    else
+    if bufnr and not windowless then
         bufnr = buf_utils.open_file_in_editor(opts.file_path)
     end
     if not bufnr then

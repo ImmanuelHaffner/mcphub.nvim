@@ -27,6 +27,10 @@
 
 local M = {}
 
+local buffer = require("mcphub.native.neovim.utils.buffer")
+local fingerprint = require("mcphub.native.neovim.files.apply_edit.fingerprint")
+local schema = require("mcphub.native.neovim.files.apply_edit.schema")
+
 --- Widen a zero-width-range or empty-replace block by borrowing one
 --- neighbouring buffer line, so that the `LocatedBlock` handed to mcphub's
 --- `EditUI` has both `found_lines` and `replace_lines` non-empty.
@@ -697,6 +701,45 @@ local function resolve_config(config)
     }
 end
 
+--- Outcome for a file whose buffer no longer holds the content its blocks were
+--- located in. Nothing has been applied. The failures mirror the planner's
+--- `stale_fingerprint` entries, one per op: an op can span several blocks.
+---
+--- @param request      mcphub.edit.applier.FileRequest
+--- @param live_content string  The buffer's current normalised content.
+--- @return mcphub.edit.applier.FileOutcome
+local function stale_outcome(request, live_content)
+    local baseline, live = fingerprint.compute(request.original_content), fingerprint.compute(live_content)
+    local failures, seen = {}, {}
+    for _, b in ipairs(request.blocks) do
+        if not seen[b.op_index] then
+            seen[b.op_index] = true
+            failures[#failures + 1] = {
+                op_index = b.op_index,
+                reason = schema.ERROR_REASONS.stale_fingerprint,
+                path = request.file_path,
+                baseline_fingerprint = baseline,
+                live_fingerprint = live,
+                live_content = live_content,
+                message = string.format(
+                    "`%s` changed after the batch was planned; op %d was not applied.",
+                    request.file_path,
+                    b.op_index
+                ),
+                hint = "the file changed while this edit waited to be applied. "
+                    .. "Re-read it with neovim__read_with_fingerprint and replan "
+                    .. "against the current content.",
+            }
+        end
+    end
+    return {
+        status = "precondition_failed",
+        failures = failures,
+        per_block = {},
+        ui_summary = string.format("refused `%s`: it changed after the batch was planned", request.file_path),
+    }
+end
+
 --- Drive one file's edits through `EditUI`. Implements the `drive_file`
 --- contract from `mcphub.native.neovim.files.apply_edit.applier.apply_plan`.
 ---
@@ -705,6 +748,15 @@ end
 --- @param config   MCPHub.ApplyEditConfig?  Optional. Absent fields fall back to this module's defaults.
 function M.drive_file(request, file_cb, config)
     local cfg = resolve_config(config)
+
+    -- The planner located the blocks in `original_content`. An earlier file of the
+    -- batch may have been under review since, and the user may have edited this one
+    -- meanwhile; widening and the collision check below read the live buffer, so
+    -- refuse before either sees content the blocks do not describe.
+    local reference_hash = vim.fn.sha256(request.original_content)
+    if buffer.content_hash(request.bufnr) ~= reference_hash then
+        return file_cb(stale_outcome(request, (buffer.normalised_content(request.bufnr))))
+    end
 
     -- Note: `EditUI` is required lazily below (just before instantiation),
     -- not at function entry, so collision-detection and no-changes paths
@@ -877,6 +929,11 @@ function M.drive_file(request, file_cb, config)
         file_path = request.file_path,
         located_blocks = located_blocks,
         original_content = request.original_content,
+        reference_hash = reference_hash,
+        on_stale = function(live_content)
+            ui:cleanup()
+            file_cb(stale_outcome(request, live_content))
+        end,
         on_complete = function()
             finalise("completed", nil)
         end,

@@ -48,6 +48,8 @@
 
 local M = {}
 
+local buffer = require("mcphub.native.neovim.utils.buffer")
+
 --- A canonical file record.
 --- @class mcphub.edit.FileRecord
 --- @field path      string                 Absolute path as Neovim names the buffer (`realpath`-canonical).
@@ -106,21 +108,9 @@ end
 --- `nvim_buf_get_lines` returns lines without their `\n` terminators. We
 --- join with `\n` and append a final `\n` iff `endofline` is set (the
 --- default — meaning the file ends with a newline on disk). The same
---- routine runs at read time and at planner-rehash time, so the hash is
---- stable across the read → apply window for unchanged buffers.
----
---- @param bufnr integer
---- @return string content
---- @return boolean endofline
-local function buffer_content(bufnr)
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local endofline = vim.bo[bufnr].endofline
-    local content = table.concat(lines, "\n")
-    if endofline and #lines > 0 then
-        content = content .. "\n"
-    end
-    return content, endofline
-end
+--- routine runs at read time, at planner-rehash time and in `EditUI`'s
+--- staleness check, so the hash is stable for unchanged buffers.
+local buffer_content = buffer.normalised_content
 
 --- Build a record from an already-loaded buffer.
 ---
