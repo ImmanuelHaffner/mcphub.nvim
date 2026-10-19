@@ -274,4 +274,41 @@ T["EditUI refuses a stale target before showing it"] = function()
     eq(child.lua_get("_G.probe.lines(...)", { path }), { "A edited", "B", "C" })
 end
 
+T["a file changed on disk during an earlier review is refused, even when showing it reloads the buffer"] = function()
+    -- A common setup: `'autoread'` plus `checktime` on `BufEnter`, so showing a buffer
+    -- whose file changed on disk reloads it after every check before showing has passed.
+    child.o.autoread = true
+    child.cmd("autocmd BufEnter * checktime")
+    local one, two = start_batch()
+    child.fn.writefile({ "inserted", "X", "dup", "Y", "dup", "Z" }, two)
+
+    accept_review()
+    local response = await_response()
+
+    eq(response.status, "partial")
+    eq(response.applied[1].path, one)
+    eq(#response.failed, 1)
+    eq(response.failed[1].reason, "stale_fingerprint")
+    eq(response.failed[1].live_content, "inserted\nX\ndup\nY\ndup\nZ\n")
+    eq(child.fn.readfile(two), { "inserted", "X", "dup", "Y", "dup", "Z" })
+    -- The refused review leaves no window behind.
+    eq(child.fn.win_findbuf(child.fn.bufnr(two)), {})
+end
+
+T["a target unloaded during an earlier review still applies"] = function()
+    local one, two = start_batch()
+    child.lua_func(function(p)
+        vim.api.nvim_buf_delete(vim.fn.bufnr(p), { unload = true })
+    end, two)
+
+    accept_review()
+    eq(child.lua_get("_G.probe.await_review(...)", { two }), true)
+    accept_review()
+    local response = await_response()
+
+    eq(response.status, "applied")
+    eq(child.fn.readfile(one), { "A2", "B", "C" })
+    eq(child.fn.readfile(two), { "X2", "dup", "Y", "dup", "Z" })
+end
+
 return T

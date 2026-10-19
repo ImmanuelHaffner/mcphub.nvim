@@ -300,6 +300,7 @@ local apply_edit_description = [[
 Apply a batch of structured edits to existing files. Use this for editing *inside* existing files; for file create / delete / rename use `neovim__write_file`, `neovim__delete_items`, `neovim__move_item`.
 
 Failures are plan-atomic: if any op fails to resolve, no buffer is touched and the response lists every problem with candidates and a hint — no fuzzy guessing, no silent wrong-location edits. Otherwise the user reviews each hunk and accepts or rejects it; per-op outcomes come back in `applied[]` / `rejected[]`.
+Files are reviewed one after another, and each is re-checked just before its review: a file that changed since planning (edited by the user, or changed on disk) is refused on its own, its ops listed in `failed[]` as `stale_fingerprint` with the file's `live_content`, while the other files still apply and the status is `partial`. Re-read that file and replan only its ops.
 
 Each op has a `kind`, a `path`, a `baseline_fingerprint` (from `neovim__read_with_fingerprint`; a mismatch means the file changed under you and the op is refused), and an `anchor`.
 
@@ -477,7 +478,7 @@ local read_input_schema = {
 }
 
 local read_description = [[
-Read a file and receive its content together with an opaque baseline fingerprint. The fingerprint is the LLM's receipt: pass it back verbatim in the `baseline_fingerprint` field of every `apply_edit` op against this file. The planner re-computes the fingerprint at apply time and refuses the batch on mismatch (`stale_fingerprint`), closing the race where the file mutates between read and edit.
+Read a file and receive its content together with an opaque baseline fingerprint. The fingerprint is the LLM's receipt: pass it back verbatim in the `baseline_fingerprint` field of every `apply_edit` op against this file. The planner re-computes the fingerprint at apply time and refuses the batch on mismatch (`stale_fingerprint`), closing the race where the file mutates between read and edit; a file that changes later, while an earlier file of the batch is under review, is refused on its own.
 
 This is the **canonical** read path for text files. Prefer it over `execute_command` + `sed`/`head`/`awk`/`cat` even for verification reads after an edit: those bypass the fingerprint binding and the buffer-first semantics, and route through the spill guard. Treat the fingerprint as opaque; do not parse or regenerate it.
 

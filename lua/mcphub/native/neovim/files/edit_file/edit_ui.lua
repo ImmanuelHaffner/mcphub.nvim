@@ -246,6 +246,37 @@ function EditUI.new(config)
     return self
 end
 
+--- Which buffer every non-floating window shows, and which window is current.
+---@return { current: integer, wins: table<integer, integer> }
+local function snapshot_layout()
+    local wins = {}
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+        if vim.api.nvim_win_get_config(win).relative == "" then
+            wins[win] = vim.api.nvim_win_get_buf(win)
+        end
+    end
+    return { current = vim.api.nvim_get_current_win(), wins = wins }
+end
+
+--- Undo showing a buffer: close the windows opened since `layout` was taken and
+--- give the others back the buffers they showed.
+---@param layout { current: integer, wins: table<integer, integer> }
+local function restore_layout(layout)
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+        if vim.api.nvim_win_get_config(win).relative == "" then
+            local buf = layout.wins[win]
+            if not buf then
+                pcall(vim.api.nvim_win_close, win, false)
+            elseif vim.api.nvim_win_get_buf(win) ~= buf and vim.api.nvim_buf_is_valid(buf) then
+                vim.api.nvim_win_set_buf(win, buf)
+            end
+        end
+    end
+    if vim.api.nvim_win_is_valid(layout.current) then
+        vim.api.nvim_set_current_win(layout.current)
+    end
+end
+
 -- Start interactive editing session
 ---@param opts table Session options. `chat_bufnr` names the chat that asked for the edit, if any.
 ---  `reference_hash` is the `content_hash` the blocks were located against; when the target no
@@ -264,18 +295,33 @@ end
 ---@param opts table Session options, as given to `start_interactive_editing`
 function EditUI:_open(opts)
     local buf_utils = require("mcphub.native.neovim.utils.buffer")
-    -- Loaded without a window first, so that a stale target is refused before it is shown.
-    local bufnr = buf_utils.load_hidden(opts.file_path)
-    if bufnr and opts.reference_hash and buf_utils.content_hash(bufnr) ~= opts.reference_hash then
+    local function is_stale(b)
+        return opts.reference_hash and buf_utils.content_hash(b) ~= opts.reference_hash
+    end
+    local function refuse(b)
         if opts.on_stale then
-            return opts.on_stale((buf_utils.normalised_content(bufnr)))
+            return opts.on_stale((buf_utils.normalised_content(b)))
         end
         return opts.on_cancel("`" .. opts.file_path .. "` changed before the edit could be applied.")
+    end
+    -- Loaded without a window first, so that a stale target is refused before it is shown.
+    local bufnr = buf_utils.load_hidden(opts.file_path)
+    if bufnr and is_stale(bufnr) then
+        return refuse(bufnr)
     end
     -- An auto-approved edit has nothing to show, so it never takes a window.
     local windowless = opts.interactive == false
     if bufnr and not windowless then
+        local layout, listed = snapshot_layout(), vim.bo[bufnr].buflisted
         bufnr = buf_utils.open_file_in_editor(opts.file_path)
+        -- Showing the buffer can reload it from disk, through the `checktime` that
+        -- `BufEnter` or `FocusGained` autocmds commonly run under `'autoread'`. Check
+        -- again before the changes make it modified, which exempts it from reloading.
+        if bufnr and is_stale(bufnr) then
+            restore_layout(layout)
+            vim.bo[bufnr].buflisted = listed
+            return refuse(bufnr)
+        end
     end
     if not bufnr then
         return (opts.on_error or opts.on_cancel)("Couldn't open buffer for editing")

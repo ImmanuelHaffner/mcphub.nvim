@@ -752,7 +752,9 @@ function M.drive_file(request, file_cb, config)
     -- The planner located the blocks in `original_content`. An earlier file of the
     -- batch may have been under review since, and the user may have edited this one
     -- meanwhile; widening and the collision check below read the live buffer, so
-    -- refuse before either sees content the blocks do not describe.
+    -- refuse before either sees content the blocks do not describe. The buffer may
+    -- also have been unloaded meanwhile, and an unloaded buffer reads as empty.
+    request.bufnr = buffer.load_hidden(request.file_path) or request.bufnr
     local reference_hash = vim.fn.sha256(request.original_content)
     if buffer.content_hash(request.bufnr) ~= reference_hash then
         return file_cb(stale_outcome(request, (buffer.normalised_content(request.bufnr))))
