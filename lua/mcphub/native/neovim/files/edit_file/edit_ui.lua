@@ -838,15 +838,17 @@ function EditUI:write_if_modified()
     local buf_state = vim.bo[bufnr]
     if file and (buf_state and buf_state.modified) then
         -- `:write` writes the current buffer, which need not be this one: an
-        -- auto-approved edit never shows its buffer in a window.
+        -- auto-approved edit never shows its buffer in a window. No file argument:
+        -- a buffer created before its directory existed keeps an unresolved name,
+        -- and `:write {file}` would take the canonical path for another file.
         vim.api.nvim_buf_call(bufnr, function()
-            local ok, err = pcall(vim.cmd.write, file)
+            local ok, err = pcall(vim.cmd.write)
             if not ok and err:match("E212") then
                 local dir = vim.fn.fnamemodify(file, ":h")
                 if vim.fn.isdirectory(dir) == 0 then
                     vim.fn.mkdir(dir, "p")
                 end
-                vim.cmd.write(file)
+                vim.cmd.write()
             end
         end)
     end
