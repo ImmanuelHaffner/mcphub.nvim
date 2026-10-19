@@ -102,7 +102,41 @@ describe("chat_bufnr", function()
     end)
 end)
 
+describe("mode_allowed", function()
+    local allowed = focus_gate._test.mode_allowed
+
+    it("matches mode codes exactly", function()
+        local cfg = focus_gate.resolve({ allow_in_modes = { "n" } })
+        assert.is_true(allowed(cfg, { mode = "n", blocking = false }))
+        for _, mode in ipairs({ "no", "niI", "ntT", "i" }) do
+            assert.is_false(allowed(cfg, { mode = mode, blocking = false }), mode)
+        end
+    end)
+
+    it("never admits a blocking mode", function()
+        local cfg = focus_gate.resolve({ allow_in_modes = { "n" } })
+        assert.is_false(allowed(cfg, { mode = "n", blocking = true }))
+        assert.is_false(allowed(focus_gate.resolve(nil), { mode = "n", blocking = true }))
+    end)
+
+    it("admits any listed mode, blockwise visual included", function()
+        local cfg = focus_gate.resolve({ allow_in_modes = { "v", "\22" } })
+        assert.is_true(allowed(cfg, { mode = "\22", blocking = false }))
+        assert.is_true(allowed(cfg, { mode = "v", blocking = false }))
+        assert.is_false(allowed(cfg, { mode = "V", blocking = false }))
+    end)
+
+    it("admits every mode without an allow list", function()
+        assert.is_true(allowed(focus_gate.resolve(nil), { mode = "i", blocking = false }))
+    end)
+end)
+
 describe("wait", function()
+    --- A config that holds the review back in whatever mode this process is in.
+    local function never()
+        return focus_gate.resolve({ allow_in_modes = { "\19" }, settle_ms = 0 })
+    end
+
     it("opens synchronously", function()
         local opened = false
         local handle = focus_gate.wait({ config = focus_gate.resolve(nil) }, function()
@@ -113,6 +147,49 @@ describe("wait", function()
         -- Closing or cancelling an opened gate is a no-op.
         handle:close()
         handle:cancel("late")
+    end)
+
+    it("holds back a review in a mode that is not allowed", function()
+        local opened = false
+        local handle = focus_gate.wait({ config = never() }, function()
+            opened = true
+        end)
+        assert.is_false(opened)
+        assert.is_true(handle.waiting)
+        assert.is.equal("blocked", handle.state.phase)
+        assert.is.equal(1, focus_gate._test.active_count())
+        handle:close()
+    end)
+
+    it("reports a cancel once, and leaves nothing behind", function()
+        local reasons = {}
+        local handle = focus_gate.wait({ config = never() }, function()
+            error("must not open")
+        end, function(reason)
+            reasons[#reasons + 1] = reason
+        end)
+        local augroup = handle.state.augroup
+
+        handle:cancel("gone")
+        handle:cancel("again")
+        handle:close()
+
+        assert.are.same({ "gone" }, reasons)
+        assert.is_false(handle.waiting)
+        assert.is_nil(handle.state)
+        assert.is.equal(0, focus_gate._test.active_count())
+        assert.is_false(pcall(vim.api.nvim_get_autocmds, { group = augroup }))
+    end)
+
+    it("closes silently", function()
+        local aborted = false
+        local handle = focus_gate.wait({ config = never() }, function() end, function()
+            aborted = true
+        end)
+        handle:close()
+        handle:cancel("late")
+        assert.is_false(aborted)
+        assert.is.equal(0, focus_gate._test.active_count())
     end)
 end)
 

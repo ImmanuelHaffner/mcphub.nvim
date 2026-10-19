@@ -33,6 +33,36 @@ local DEFAULT_SETTLE_MS = 2000
 ---@field waiting boolean Whether the review is still held back
 ---@field cancel fun(self: MCPHub.FocusGate.Handle, reason: string) Give up on the review and report `reason`
 ---@field close fun(self: MCPHub.FocusGate.Handle) Give up on the review silently, e.g. while cleaning up
+---@field state MCPHub.FocusGate.State? Why the review waits; nil once it no longer does
+
+---@class MCPHub.FocusGate.State
+---@field id integer
+---@field phase "blocked"|"settling"|"closed"
+---@field reason string? The first condition that fails, e.g. "insert mode"; nil while settling
+---@field settle_deadline integer? `vim.uv.now()` at which the settle period ends
+---@field augroup integer?
+---@field timer uv.uv_timer_t?
+
+--- Names for the modes a review waits out, by the first character of the mode code.
+local MODE_NAMES = {
+    n = "normal mode",
+    i = "insert mode",
+    R = "replace mode",
+    v = "visual mode",
+    V = "visual mode",
+    ["\22"] = "visual mode",
+    s = "select mode",
+    S = "select mode",
+    ["\19"] = "select mode",
+    c = "command line",
+    t = "terminal mode",
+    r = "prompt",
+    ["!"] = "shell",
+}
+
+local next_id = 0
+--- Gates currently waiting, so specs can prove that none outlives its review.
+local active = 0
 
 --- Warnings already shown. `EditUI.new` resolves the config once per review, so
 --- a misconfiguration would otherwise warn on every single edit.
@@ -115,19 +145,151 @@ function M.chat_bufnr(caller)
     return nil
 end
 
+--- Whether the mode `m` lets a review open. Mode codes match exactly, so `{ "n" }`
+--- admits neither Operator-pending `no` nor `niI` from `i_CTRL-O`.
+---@param config MCPHub.FocusGate.Config
+---@param m { mode: string, blocking: boolean }
+---@return boolean
+local function mode_allowed(config, m)
+    return not m.blocking and (config.allow_in_modes == nil or config.allow_in_modes[m.mode] == true)
+end
+
+---@param m { mode: string, blocking: boolean }
+---@return string
+local function mode_reason(m)
+    if m.blocking then
+        return "waiting for input"
+    elseif vim.startswith(m.mode, "no") then
+        return "operator pending"
+    end
+    return MODE_NAMES[m.mode:sub(1, 1)] or ("mode " .. m.mode)
+end
+
+--- The first condition that holds the review back, or nil when it may open.
+---@param config MCPHub.FocusGate.Config
+---@return string?
+local function blocked_by(config)
+    local m = vim.api.nvim_get_mode()
+    if not mode_allowed(config, m) then
+        return mode_reason(m)
+    end
+    return nil
+end
+
 --- Hold a review back until it may take focus, then call `on_open`.
+---
+--- When every condition holds on entry the review opens synchronously. Otherwise
+--- the gate waits until they all hold, and then for `settle_ms` more, starting the
+--- settle period afresh whenever a condition fails again, so that a user who
+--- leaves insert mode only briefly is not interrupted.
 ---@param opts MCPHub.FocusGate.Opts
 ---@param on_open fun() Opens the review
----@param _on_abort fun(reason: string)? Reports a review given up before it opened
+---@param on_abort fun(reason: string)? Reports a review given up before it opened
 ---@return MCPHub.FocusGate.Handle
-function M.wait(opts, on_open, _on_abort)
+function M.wait(opts, on_open, on_abort)
     assert(type(opts) == "table" and opts.config, "focus_gate.wait: opts.config is required")
+    local config = opts.config
+
+    local reason = not M.inert(config) and blocked_by(config) or nil
+    if not reason then
+        on_open()
+        return {
+            waiting = false,
+            cancel = function() end,
+            close = function() end,
+        }
+    end
+
+    next_id, active = next_id + 1, active + 1
+    ---@type MCPHub.FocusGate.State
+    local state = { id = next_id, phase = "blocked", reason = reason }
+    ---@type fun(): boolean Whether this call closed the gate, rather than an earlier one
+    local close
+    ---@type MCPHub.FocusGate.Handle
     local handle = {
-        waiting = false,
-        cancel = function() end,
-        close = function() end,
+        waiting = true,
+        state = state,
+        cancel = function(_, why)
+            if close() and on_abort then
+                on_abort(why)
+            end
+        end,
+        close = function()
+            close()
+        end,
     }
-    on_open()
+    -- Bumped whenever a settle timer starts or stops, so that a timer callback
+    -- already queued on the main loop can tell it has been superseded.
+    local generation = 0
+
+    local function stop_timer()
+        generation = generation + 1
+        if state.timer then
+            state.timer:stop()
+            state.timer:close()
+            state.timer = nil
+        end
+        state.settle_deadline = nil
+    end
+
+    close = function()
+        if state.phase == "closed" then
+            return false
+        end
+        state.phase = "closed"
+        stop_timer()
+        pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
+        handle.waiting, handle.state = false, nil
+        active = active - 1
+        return true
+    end
+
+    local function evaluate()
+        if state.phase == "closed" then
+            return
+        end
+        local why = blocked_by(config)
+        if why then
+            if state.phase == "settling" then
+                stop_timer()
+            end
+            state.phase, state.reason = "blocked", why
+            return
+        end
+        if state.phase == "settling" then
+            return
+        end
+        state.phase, state.reason = "settling", nil
+        stop_timer()
+        local mine = generation
+        state.settle_deadline = vim.uv.now() + config.settle_ms
+        state.timer = vim.uv.new_timer()
+        state.timer:start(
+            config.settle_ms,
+            0,
+            vim.schedule_wrap(function()
+                if mine ~= generation or state.phase ~= "settling" then
+                    return
+                end
+                -- No event reports every way a condition can fail again, so check once more.
+                if blocked_by(config) then
+                    return evaluate()
+                end
+                if close() then
+                    on_open()
+                end
+            end)
+        )
+    end
+
+    state.augroup = vim.api.nvim_create_augroup("mcphub_focus_gate_" .. state.id, { clear = true })
+    vim.api.nvim_create_autocmd({ "ModeChanged", "WinEnter", "TabEnter", "BufWinEnter", "WinClosed" }, {
+        group = state.augroup,
+        callback = function()
+            vim.schedule(evaluate)
+        end,
+    })
+
     return handle
 end
 
@@ -135,6 +297,10 @@ end
 M._test = {
     reset_warnings = function()
         warned = {}
+    end,
+    mode_allowed = mode_allowed,
+    active_count = function()
+        return active
     end,
 }
 

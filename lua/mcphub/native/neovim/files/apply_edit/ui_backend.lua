@@ -817,12 +817,6 @@ function M.drive_file(request, file_cb, config)
         return file_cb({ status = "no_changes", per_block = {} })
     end
 
-    -- Origin window for "return-to-origin on complete". The current window
-    -- is fine: `EditUI.open_file_in_editor` filters by `buftype == ""` when
-    -- picking a target split, so the CodeCompanion chat (buftype = "acwrite")
-    -- is structurally excluded — see spelunking notes.
-    local origin_winnr = vim.api.nvim_get_current_win()
-
     -- Lazy require: we only need EditUI now that we're about to instantiate
     -- one. The collision-detection and no-changes early-returns above
     -- complete without touching mcphub's plugin tree.
@@ -926,7 +920,6 @@ function M.drive_file(request, file_cb, config)
     ui:start_interactive_editing({
         interactive = request.interactive ~= false,
         is_replacing_entire_file = false,
-        origin_winnr = origin_winnr,
         chat_bufnr = request.chat_bufnr,
         file_path = request.file_path,
         located_blocks = located_blocks,

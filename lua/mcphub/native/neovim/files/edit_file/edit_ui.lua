@@ -189,7 +189,7 @@ EditUI.__index = EditUI
 
 -- UI State tracking
 ---@class UIState
----@field origin_winnr integer Window number of the start
+---@field origin_winnr integer Window that was current when the review opened, and that completion returns to
 ---@field bufnr integer Buffer number being edited
 ---@field windowless boolean Whether the session works on the buffer without showing it in a window
 ---@field file_path string Path to the file
@@ -286,7 +286,14 @@ function EditUI:start_interactive_editing(opts)
     if opts.interactive == false then
         return self:_open(opts)
     end
-    self.gate = focus_gate.wait({ config = self.defer, chat_bufnr = opts.chat_bufnr }, function()
+    -- Loaded now, so that the gate can watch the buffer the reference was taken from.
+    local bufnr = opts.file_path and require("mcphub.native.neovim.utils.buffer").load_hidden(opts.file_path)
+    self.gate = focus_gate.wait({
+        config = self.defer,
+        chat_bufnr = opts.chat_bufnr,
+        bufnr = bufnr,
+        reference_hash = opts.reference_hash,
+    }, function()
         self:_open(opts)
     end, opts.on_cancel)
 end
@@ -294,6 +301,8 @@ end
 -- Open the review: show the file, apply the changes and highlight them
 ---@param opts table Session options, as given to `start_interactive_editing`
 function EditUI:_open(opts)
+    -- The user may have moved on while the review waited; completion returns here.
+    local origin_winnr = vim.api.nvim_get_current_win()
     local buf_utils = require("mcphub.native.neovim.utils.buffer")
     local function is_stale(b)
         return opts.reference_hash and buf_utils.content_hash(b) ~= opts.reference_hash
@@ -327,7 +336,7 @@ function EditUI:_open(opts)
         return (opts.on_error or opts.on_cancel)("Couldn't open buffer for editing")
     end
     self.state = {
-        origin_winnr = opts.origin_winnr,
+        origin_winnr = origin_winnr,
         bufnr = bufnr,
         windowless = windowless,
         is_replacing_entire_file = opts.is_replacing_entire_file,

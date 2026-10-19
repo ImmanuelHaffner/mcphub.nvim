@@ -2,7 +2,6 @@
 -- Coordinates parsing, location, and UI components
 
 ---@class EditSession
----@field origin_winnr number Window number where the session started
 ---@field file_path string Path to the file being edited
 ---@field diff_content string Raw diff content from LLM
 ---@field config EditSessionConfig Configuration options
@@ -61,7 +60,6 @@ function EditSession.new(file_path, diff_content, config)
     self.diff_content = diff_content
     self.config = vim.tbl_deep_extend("force", DEFAULT_CONFIG, config or {})
 
-    self.origin_winnr = vim.api.nvim_get_current_win()
     -- Load components
     local DiffParser = require("mcphub.native.neovim.files.edit_file.diff_parser")
     local BlockLocator = require("mcphub.native.neovim.files.edit_file.block_locator")
@@ -172,7 +170,6 @@ function EditSession:start(options)
     self.ui:start_interactive_editing({
         interactive = options.interactive ~= false,
         is_replacing_entire_file = is_replacing_entire_file,
-        origin_winnr = self.origin_winnr,
         chat_bufnr = options.chat_bufnr,
         file_path = self.file_path,
         located_blocks = self.located_blocks,
