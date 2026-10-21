@@ -281,6 +281,8 @@ end
 ---@param opts table Session options. `chat_bufnr` names the chat that asked for the edit, if any.
 ---  `reference_hash` is the `content_hash` the blocks were located against; when the target no
 ---  longer matches it, nothing is applied and `on_stale(live_content)` (or `on_cancel`) is called.
+---  `on_gate(handle)` receives the gate when the review has to wait, so that the caller can
+---  cancel it; a review given up before it opened ends in `on_cancel(reason)`.
 function EditUI:start_interactive_editing(opts)
     -- Auto-approved edits are never held back: there is nothing for the user to look at.
     if opts.interactive == false then
@@ -296,6 +298,9 @@ function EditUI:start_interactive_editing(opts)
     }, function()
         self:_open(opts)
     end, opts.on_cancel)
+    if self.gate.waiting and opts.on_gate then
+        opts.on_gate(self.gate)
+    end
 end
 
 -- Open the review: show the file, apply the changes and highlight them

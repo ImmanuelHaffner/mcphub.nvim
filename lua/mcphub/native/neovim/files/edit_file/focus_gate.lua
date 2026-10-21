@@ -336,7 +336,61 @@ function M.wait(opts, on_open, on_abort)
         end,
     })
 
+    -- A review whose chat or file is gone has no one left to show it to. A hidden
+    -- buffer is not gone, and neither event means gone on its own: `:edit` unloads a
+    -- buffer only to load it again, and renaming a listed buffer deletes its old name.
+    -- So each event only prompts a look, once the command behind it has finished.
+    for _, watched in ipairs({
+        { opts.chat_bufnr, "The chat that requested this edit was closed." },
+        { opts.bufnr, "The file's buffer was closed before the review opened." },
+    }) do
+        local bufnr, why = watched[1], watched[2]
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+            vim.api.nvim_create_autocmd({ "BufUnload", "BufDelete", "BufWipeout" }, {
+                group = state.augroup,
+                buffer = bufnr,
+                callback = function()
+                    vim.schedule(function()
+                        if not (vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_is_loaded(bufnr)) then
+                            handle:cancel(why)
+                        end
+                    end)
+                end,
+            })
+        end
+    end
+
     return handle
+end
+
+--- The hook that stops a tool call's waiting reviews when the user stops the turn.
+---
+--- CodeCompanion keeps one job per tool call and kills it on stop, so a call that
+--- reviews several files registers once, with a handle that cancels whichever of
+--- its reviews is waiting at that moment. It registers only once a review actually
+--- waits, leaving every other edit out of CodeCompanion's job slot.
+---@param caller table? `req.caller` of a native tool call
+---@return (fun(handle: MCPHub.FocusGate.Handle))? on_gate Hand it every waiting gate; nil without a stop hook
+function M.on_turn_stop(caller)
+    if type(caller) ~= "table" or type(caller.register_job) ~= "function" then
+        return nil
+    end
+    local waiting, registered = nil, false
+    return function(handle)
+        waiting = handle
+        if registered then
+            return
+        end
+        registered = true
+        caller.register_job({
+            -- May come long after the review opened; cancelling an open gate is a no-op.
+            kill = function()
+                if waiting then
+                    waiting:cancel("Stopped by the user.")
+                end
+            end,
+        })
+    end
 end
 
 --- Test-only surface; not part of the module's contract.

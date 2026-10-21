@@ -20,6 +20,7 @@ local function handle_write_file(req, res)
         replace_file_content = content,
         interactive = req.caller.auto_approve ~= true,
         chat_bufnr = focus_gate.chat_bufnr(req.caller),
+        on_gate = focus_gate.on_turn_stop(req.caller),
         on_success = function(summary)
             res:text(summary):send()
         end,

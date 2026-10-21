@@ -177,6 +177,7 @@ IMPORTANT: Batch multiple related changes for a file into a single call to minim
         session:start({
             interactive = req.caller.auto_approve ~= true,
             chat_bufnr = focus_gate.chat_bufnr(req.caller),
+            on_gate = focus_gate.on_turn_stop(req.caller),
             on_success = function(summary)
                 res:text(summary):send()
             end,

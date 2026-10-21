@@ -193,6 +193,43 @@ describe("wait", function()
     end)
 end)
 
+describe("on_turn_stop", function()
+    local function never()
+        return focus_gate.resolve({ allow_in_modes = { "\19" }, settle_ms = 0 })
+    end
+
+    it("gives nothing to a caller that cannot be stopped", function()
+        assert.is_nil(focus_gate.on_turn_stop(nil))
+        assert.is_nil(focus_gate.on_turn_stop({ type = "hubui" }))
+    end)
+
+    it("registers once per call and cancels the review waiting when the turn stops", function()
+        local jobs, reasons = {}, {}
+        local on_gate = focus_gate.on_turn_stop({
+            register_job = function(job)
+                jobs[#jobs + 1] = job
+            end,
+        })
+        local function waiting(name)
+            return focus_gate.wait({ config = never() }, function() end, function(reason)
+                reasons[#reasons + 1] = name .. ": " .. reason
+            end)
+        end
+        assert.is.equal(0, #jobs)
+
+        local first = waiting("first")
+        on_gate(first)
+        first:close()
+        on_gate(waiting("second"))
+        assert.is.equal(1, #jobs)
+
+        jobs[1].kill("sigterm")
+        jobs[1].kill("sigterm")
+        assert.are.same({ "second: Stopped by the user." }, reasons)
+        assert.is.equal(0, focus_gate._test.active_count())
+    end)
+end)
+
 describe("EditUI seam", function()
     --- Start an `EditUI` session with `_open` stubbed out, so no window is touched,
     --- while spying on `focus_gate.wait`.

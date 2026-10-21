@@ -83,6 +83,43 @@ function _G.probe.active_gates()
     return require("mcphub.native.neovim.files.edit_file.focus_gate")._test.active_count()
 end
 
+--- Call the real `apply_edit` tool as a CodeCompanion chat would, recording the
+--- stop hooks it registers in `_G.probe.jobs`.
+function _G.probe.tool(input, defer, chat_bufnr)
+    require("mcphub.state").config.builtin_tools = { apply_edit = { ui = { defer = defer } } }
+    local tool = require("mcphub.native.neovim.files.apply_edit")[1]
+    _G.probe.response, _G.probe.jobs = nil, {}
+    local res = {}
+    function res:text(body)
+        self.body = body
+        return self
+    end
+    function res:send()
+        _G.probe.response = vim.json.decode(self.body)
+    end
+    function res:error(err)
+        _G.probe.response = { error = err }
+    end
+    tool.handler({
+        params = input,
+        caller = {
+            type = "codecompanion",
+            codecompanion = { chat = { bufnr = chat_bufnr } },
+            auto_approve = false,
+            register_job = function(job)
+                table.insert(_G.probe.jobs, job)
+            end,
+        },
+    }, res)
+end
+
+function _G.probe.stop_turn()
+    for _, job in ipairs(_G.probe.jobs) do
+        job.kill("sigterm")
+    end
+end
+
+
 --- A stand-in for a CodeCompanion chat: a scratch buffer, which the review never
 --- picks to show a file in.
 function _G.probe.make_chat()
@@ -149,9 +186,10 @@ end
 --- Start an interactive `apply_edit` replacing line 2 of a fresh fixture.
 ---@param defer table? The `ui.defer` to review with
 ---@param chat_bufnr integer? The chat that asks for the edit
+---@param path string? An existing target; default: a fresh fixture
 ---@return string path
-local function start_apply_edit(defer, chat_bufnr)
-    local path = fixture("target.txt", { "A", "B", "C" })
+local function start_apply_edit(defer, chat_bufnr, path)
+    path = path or fixture("target.txt", { "A", "B", "C" })
     local fp = child.lua_get("_G.probe.fingerprint(...)", { path })
     child.lua_func(function(input, d, c)
         _G.probe.apply_edit(input, d, c)
@@ -401,6 +439,139 @@ T["a review requested while typing in the chat opens after Esc, and completion r
     child.type_keys("ga")
     eq(child.lua_get("_G.probe.await_response()").status, "applied")
     eq(child.api.nvim_get_current_win(), chat_win)
+end
+
+local CHAT_GONE = "The chat that requested this edit was closed."
+local FILE_GONE = "The file's buffer was closed before the review opened."
+
+local function await_response()
+    return child.lua_get("_G.probe.await_response()")
+end
+
+--- Call the `apply_edit` tool on line 2 of each of `names`, fresh fixtures all.
+---@return string[] paths
+local function call_tool(names, defer)
+    local ops, paths = {}, {}
+    for _, name in ipairs(names) do
+        local path = fixture(name, { "A", "B", "C" })
+        paths[#paths + 1] = path
+        ops[#ops + 1] = {
+            kind = "replace_range",
+            path = path,
+            baseline_fingerprint = child.lua_get("_G.probe.fingerprint(...)", { path }),
+            anchor = { by = "line_range", start = 2, ["end"] = 2 },
+            content = "B2",
+            indent = "preserve",
+        }
+    end
+    child.lua_func(function(input, d)
+        _G.probe.tool(input, d)
+    end, { ops = ops }, defer)
+    return paths
+end
+
+T["wiping the chat cancels a waiting review"] = function()
+    local chat = make_chat()
+    local before = child.api.nvim_get_current_win()
+    local path = start_apply_edit({ chat = "focused", settle_ms = SETTLE_MS }, chat)
+    eq(child.lua_get("_G.probe.active_gates()"), 1)
+
+    child.cmd("bwipeout " .. chat)
+    local response = await_response()
+    eq(response.status, "cancelled")
+    eq(response.files[1].cancel_reason, CHAT_GONE)
+    eq(child.lua_get("_G.probe.active_gates()"), 0)
+    eq(child.api.nvim_get_current_win(), before)
+    eq(child.fn.win_findbuf(child.fn.bufnr(path)), {})
+    eq(child.fn.readfile(path), { "A", "B", "C" })
+end
+
+T["hiding the chat keeps a review waiting"] = function()
+    local chat = make_chat()
+    local chat_win = split_chat(chat)
+    gate({ chat = "focused", settle_ms = SETTLE_MS }, chat)
+    eq(reason(), "chat unfocused")
+
+    child.api.nvim_win_close(chat_win, false)
+    eq(await_reason("chat hidden"), "chat hidden")
+    idle(4 * SETTLE_MS)
+    eq(reason(), "chat hidden")
+
+    child.api.nvim_set_current_win(split_chat(chat))
+    eq(await_reason("open"), "open")
+end
+
+T["reloading the target keeps a review waiting, wiping it cancels"] = function()
+    local path = fixture("target.txt", { "A", "B", "C" })
+    child.cmd("edit " .. vim.fn.fnameescape(path))
+    child.type_keys("i")
+    start_apply_edit(NORMAL_ONLY, nil, path)
+
+    -- `:edit` unloads the buffer before loading it again.
+    child.cmd("edit")
+    idle(4 * SETTLE_MS)
+    eq(child.lua_get("_G.probe.active_gates()"), 1)
+
+    child.cmd("bwipeout! " .. child.fn.bufnr(path))
+    local response = await_response()
+    eq(response.status, "cancelled")
+    eq(response.files[1].cancel_reason, FILE_GONE)
+    eq(child.lua_get("_G.probe.active_gates()"), 0)
+end
+
+T["edit_file reports a review cancelled before it opened"] = function()
+    local path = fixture("target.txt", { "A", "B", "C" })
+    child.type_keys("i")
+    child.lua_func(function(p, d)
+        _G.probe.edit_file(p, "<<<<<<< SEARCH\nB\n=======\nB2\n>>>>>>> REPLACE", d)
+    end, path, NORMAL_ONLY)
+
+    child.cmd("bwipeout " .. child.fn.bufnr(path))
+    local response = await_response()
+    eq(response.ok, false)
+    eq(response.error:find(FILE_GONE, 1, true) ~= nil, true)
+    eq(child.fn.readfile(path), { "A", "B", "C" })
+end
+
+T["stopping the turn cancels the waiting review and the rest of the batch"] = function()
+    child.type_keys("i")
+    local paths = call_tool({ "one.txt", "two.txt", "three.txt" }, NORMAL_ONLY)
+    eq(child.lua_get("#_G.probe.jobs"), 1)
+
+    child.lua("_G.probe.stop_turn()")
+    local response = await_response()
+    eq(response.status, "cancelled")
+    eq(#response.files, 1)
+    eq(response.files[1].cancel_reason, "Stopped by the user.")
+    local not_attempted = {}
+    for _, failure in ipairs(response.failed) do
+        if failure.reason == "not_attempted" then
+            not_attempted[#not_attempted + 1] = failure.path
+        end
+    end
+    eq(not_attempted, { paths[2], paths[3] })
+    for _, path in ipairs(paths) do
+        eq(child.fn.readfile(path), { "A", "B", "C" })
+    end
+    eq(child.lua_get("_G.probe.active_gates()"), 0)
+end
+
+T["a stop after the review opened leaves the review open"] = function()
+    child.type_keys("i")
+    local path = call_tool({ "target.txt" }, NORMAL_ONLY)[1]
+    child.type_keys("<Esc>")
+    eq(await_review(path), true)
+
+    child.lua("_G.probe.stop_turn()")
+    eq(in_review(path), true)
+    child.type_keys("ga")
+    eq(await_response().status, "applied")
+end
+
+T["an edit that never waits registers no stop hook"] = function()
+    local path = call_tool({ "target.txt" }, NORMAL_ONLY)[1]
+    eq(in_review(path), true)
+    eq(child.lua_get("#_G.probe.jobs"), 0)
 end
 
 return T

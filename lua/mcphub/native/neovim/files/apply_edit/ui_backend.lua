@@ -921,6 +921,7 @@ function M.drive_file(request, file_cb, config)
         interactive = request.interactive ~= false,
         is_replacing_entire_file = false,
         chat_bufnr = request.chat_bufnr,
+        on_gate = request.on_gate,
         file_path = request.file_path,
         located_blocks = located_blocks,
         original_content = request.original_content,

@@ -171,6 +171,7 @@ function EditSession:start(options)
         interactive = options.interactive ~= false,
         is_replacing_entire_file = is_replacing_entire_file,
         chat_bufnr = options.chat_bufnr,
+        on_gate = options.on_gate,
         file_path = self.file_path,
         located_blocks = self.located_blocks,
         original_content = file_content,
