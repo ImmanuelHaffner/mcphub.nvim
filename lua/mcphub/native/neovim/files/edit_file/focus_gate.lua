@@ -165,12 +165,58 @@ local function mode_reason(m)
     return MODE_NAMES[m.mode:sub(1, 1)] or ("mode " .. m.mode)
 end
 
---- The first condition that holds the review back, or nil when it may open.
+--- Where the chat is, as far as the user can tell: "focused", "visible" in the current
+--- tab, shown only in an "other_tab", or "hidden" in no window at all.
+---@param chat_bufnr integer
+---@return "focused"|"visible"|"other_tab"|"hidden"
+local function chat_placement(chat_bufnr)
+    if vim.api.nvim_win_get_buf(0) == chat_bufnr then
+        return "focused"
+    end
+    local tab, elsewhere = vim.api.nvim_get_current_tabpage(), false
+    -- Floating windows count, so a floating chat layout works too.
+    for _, win in ipairs(vim.fn.win_findbuf(chat_bufnr)) do
+        if vim.api.nvim_win_get_tabpage(win) == tab then
+            return "visible"
+        end
+        elsewhere = true
+    end
+    return elsewhere and "other_tab" or "hidden"
+end
+
+local CHAT_REASONS = {
+    visible = "chat unfocused",
+    other_tab = "chat in other tab",
+    hidden = "chat hidden",
+}
+
+--- Why the chat holds the review back, or nil when it does not. A caller that is no
+--- chat, such as the hub UI, passes no `chat_bufnr`, and nothing holds it back.
 ---@param config MCPHub.FocusGate.Config
+---@param chat_bufnr integer?
 ---@return string?
-local function blocked_by(config)
+local function chat_reason(config, chat_bufnr)
+    if not config.chat or not chat_bufnr then
+        return nil
+    end
+    local placement = chat_placement(chat_bufnr)
+    if placement == "focused" or (placement == "visible" and config.chat == "visible") then
+        return nil
+    end
+    return CHAT_REASONS[placement]
+end
+
+--- The first condition that holds the review back, or nil when it may open. The chat
+--- comes first: getting to it is the step the user has to take before any other.
+---@param opts MCPHub.FocusGate.Opts
+---@return string?
+local function blocked_by(opts)
+    local chat = chat_reason(opts.config, opts.chat_bufnr)
+    if chat then
+        return chat
+    end
     local m = vim.api.nvim_get_mode()
-    if not mode_allowed(config, m) then
+    if not mode_allowed(opts.config, m) then
         return mode_reason(m)
     end
     return nil
@@ -190,7 +236,7 @@ function M.wait(opts, on_open, on_abort)
     assert(type(opts) == "table" and opts.config, "focus_gate.wait: opts.config is required")
     local config = opts.config
 
-    local reason = not M.inert(config) and blocked_by(config) or nil
+    local reason = not M.inert(config) and blocked_by(opts) or nil
     if not reason then
         on_open()
         return {
@@ -248,7 +294,7 @@ function M.wait(opts, on_open, on_abort)
         if state.phase == "closed" then
             return
         end
-        local why = blocked_by(config)
+        local why = blocked_by(opts)
         if why then
             if state.phase == "settling" then
                 stop_timer()
@@ -272,7 +318,7 @@ function M.wait(opts, on_open, on_abort)
                     return
                 end
                 -- No event reports every way a condition can fail again, so check once more.
-                if blocked_by(config) then
+                if blocked_by(opts) then
                     return evaluate()
                 end
                 if close() then

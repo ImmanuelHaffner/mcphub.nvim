@@ -1,7 +1,9 @@
---- Tests that an interactive review configured with `ui.defer.allow_in_modes`
---- waits for an allowed mode and a settle period before it takes focus.
+--- Tests that an interactive review configured with `ui.defer` waits for an allowed
+--- mode, for the invoking chat to be visible or focused, and for a settle period
+--- before it takes focus.
 ---
---- Every case runs in a child Neovim, driving real mode changes with typed keys.
+--- Every case runs in a child Neovim, driving real mode, window and tab changes. A
+--- scratch buffer stands in for the CodeCompanion chat.
 --- Waiting is observed by polling the child, never by sleeping in it: the settle
 --- period is short, and each case only asserts what holds before it can elapse
 --- or after it certainly has.
@@ -25,11 +27,12 @@ function _G.probe.fingerprint(path)
 end
 
 --- Start an interactive `apply_edit` with `defer` as its `ui.defer`.
-function _G.probe.apply_edit(input, defer)
+function _G.probe.apply_edit(input, defer, chat_bufnr)
     local engine = require("mcphub.native.neovim.files.apply_edit.engine")
     local ui_backend = require("mcphub.native.neovim.files.apply_edit.ui_backend")
     _G.probe.response = nil
     engine.apply(input, function(request, file_cb)
+        request.chat_bufnr = chat_bufnr
         return ui_backend.drive_file(request, file_cb, { ui = { defer = defer } })
     end, function(r)
         _G.probe.response = r
@@ -79,6 +82,39 @@ end
 function _G.probe.active_gates()
     return require("mcphub.native.neovim.files.edit_file.focus_gate")._test.active_count()
 end
+
+--- A stand-in for a CodeCompanion chat: a scratch buffer, which the review never
+--- picks to show a file in.
+function _G.probe.make_chat()
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(bufnr, "[chat]")
+    return bufnr
+end
+
+--- Wait on a bare gate, so that a case can read why it waits.
+function _G.probe.gate(defer, chat_bufnr)
+    local focus_gate = require("mcphub.native.neovim.files.edit_file.focus_gate")
+    _G.probe.opened = false
+    _G.probe.handle = focus_gate.wait({ config = focus_gate.resolve(defer), chat_bufnr = chat_bufnr }, function()
+        _G.probe.opened = true
+    end)
+end
+
+--- "open", the reason the gate waits, or "settling".
+function _G.probe.reason()
+    if _G.probe.opened then
+        return "open"
+    end
+    local state = _G.probe.handle.state
+    return state and (state.reason or state.phase) or "closed"
+end
+
+function _G.probe.await_reason(expected)
+    vim.wait(2000, function()
+        return _G.probe.reason() == expected
+    end, 10)
+    return _G.probe.reason()
+end
 ]]
 
 local SETTLE_MS = 50
@@ -112,12 +148,13 @@ end
 
 --- Start an interactive `apply_edit` replacing line 2 of a fresh fixture.
 ---@param defer table? The `ui.defer` to review with
+---@param chat_bufnr integer? The chat that asks for the edit
 ---@return string path
-local function start_apply_edit(defer)
+local function start_apply_edit(defer, chat_bufnr)
     local path = fixture("target.txt", { "A", "B", "C" })
     local fp = child.lua_get("_G.probe.fingerprint(...)", { path })
-    child.lua_func(function(input, d)
-        _G.probe.apply_edit(input, d)
+    child.lua_func(function(input, d, c)
+        _G.probe.apply_edit(input, d, c)
     end, {
         ops = {
             {
@@ -129,7 +166,7 @@ local function start_apply_edit(defer)
                 indent = "preserve",
             },
         },
-    }, defer)
+    }, defer, chat_bufnr)
     return path
 end
 
@@ -271,6 +308,99 @@ T["a gate leaves no autocmd or timer behind once the review opens"] = function()
     eq(await_review(path), true)
     eq(child.lua_get("_G.probe.active_gates()"), 0)
     eq(child.lua_get("_G.probe.gate_autocmds()"), 0)
+end
+
+local function make_chat()
+    return child.lua_get("_G.probe.make_chat()")
+end
+
+local function gate(defer, chat_bufnr)
+    child.lua_func(function(d, c)
+        _G.probe.gate(d, c)
+    end, defer, chat_bufnr)
+end
+
+local function reason()
+    return child.lua_get("_G.probe.reason()")
+end
+
+local function await_reason(expected)
+    return child.lua_get("_G.probe.await_reason(...)", { expected })
+end
+
+--- Show `chat` in a vertical split and return to the window that was current.
+---@return integer chat_win
+local function split_chat(chat)
+    child.cmd("vertical sbuffer " .. chat)
+    local chat_win = child.api.nvim_get_current_win()
+    child.cmd("wincmd p")
+    return chat_win
+end
+
+T["chat = visible waits while the chat is only in another tab"] = function()
+    local chat = make_chat()
+    child.cmd("tabnew")
+    child.api.nvim_win_set_buf(0, chat)
+    child.cmd("tabprevious")
+
+    gate({ chat = "visible", settle_ms = SETTLE_MS }, chat)
+    eq(reason(), "chat in other tab")
+
+    child.cmd("tabnext")
+    eq(await_reason("open"), "open")
+end
+
+T["chat = visible waits while the chat is in no window, and not for focus"] = function()
+    local chat = make_chat()
+    gate({ chat = "visible", settle_ms = SETTLE_MS }, chat)
+    eq(reason(), "chat hidden")
+
+    local chat_win = split_chat(chat)
+    eq(await_reason("open"), "open")
+    eq(child.api.nvim_get_current_win() ~= chat_win, true)
+end
+
+T["chat = focused waits for the chat window first, then for an allowed mode"] = function()
+    local chat = make_chat()
+    local chat_win = split_chat(chat)
+    child.type_keys("i")
+
+    gate({ chat = "focused", allow_in_modes = { "n" }, settle_ms = SETTLE_MS }, chat)
+    -- Both conditions fail; the chat is named first.
+    eq(reason(), "chat unfocused")
+
+    child.api.nvim_set_current_win(chat_win)
+    eq(await_reason("insert mode"), "insert mode")
+
+    child.type_keys("<Esc>")
+    eq(await_reason("open"), "open")
+end
+
+T["chat = focused leaves a caller without a chat to the mode condition alone"] = function()
+    local defer = { chat = "focused", allow_in_modes = { "n" }, settle_ms = SETTLE_MS }
+    gate(defer, nil)
+    eq(reason(), "open")
+
+    child.type_keys("i")
+    gate(defer, nil)
+    eq(reason(), "insert mode")
+end
+
+T["a review requested while typing in the chat opens after Esc, and completion returns to the chat"] = function()
+    local chat = make_chat()
+    local chat_win = split_chat(chat)
+    child.api.nvim_set_current_win(chat_win)
+    child.type_keys("i")
+
+    local path = start_apply_edit({ chat = "focused", allow_in_modes = { "n" }, settle_ms = SETTLE_MS }, chat)
+    idle(4 * SETTLE_MS)
+    eq(child.api.nvim_get_current_win(), chat_win)
+
+    child.type_keys("<Esc>")
+    eq(await_review(path), true)
+    child.type_keys("ga")
+    eq(child.lua_get("_G.probe.await_response()").status, "applied")
+    eq(child.api.nvim_get_current_win(), chat_win)
 end
 
 return T

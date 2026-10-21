@@ -198,7 +198,7 @@ describe("EditUI seam", function()
     --- while spying on `focus_gate.wait`.
     ---@param ui_config table?
     ---@param opts table
-    ---@return { opened: boolean, waited: table? }
+    ---@return { opened: boolean, waited: table?, ui: EditUI }
     local function start(ui_config, opts)
         local seen = { opened = false }
         local real_wait = focus_gate.wait
@@ -207,6 +207,7 @@ describe("EditUI seam", function()
             return real_wait(gate_opts, on_open, on_abort)
         end
         local ui = edit_ui.new(ui_config)
+        seen.ui = ui
         ui._open = function()
             seen.opened = true
         end
@@ -220,7 +221,11 @@ describe("EditUI seam", function()
 
     it("routes an interactive review through the gate with its chat and config", function()
         local seen = start({ defer = { chat = "focused", settle_ms = 10 } }, { interactive = true, chat_bufnr = 7 })
-        assert.is_true(seen.opened)
+        -- No window shows buffer 7, so the gate holds the review back until cleanup.
+        assert.is_false(seen.opened)
+        assert.is_true(seen.ui.gate.waiting)
+        seen.ui:cleanup()
+        assert.is.equal(0, focus_gate._test.active_count())
         assert.is_not_nil(seen.waited)
         assert.is.equal(7, seen.waited.chat_bufnr)
         assert.is.equal("focused", seen.waited.config.chat)
