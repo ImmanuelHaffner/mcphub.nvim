@@ -81,6 +81,9 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
                     on_job = function(job)
                         exec_ui.attach(tools, job)
                     end,
+                    show_pending = function(row)
+                        return exec_ui.attach_row(tools, row)
+                    end,
                 },
                 parse_response = true,
                 callback = function(res, err)

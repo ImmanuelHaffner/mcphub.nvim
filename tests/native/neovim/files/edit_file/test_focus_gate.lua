@@ -230,6 +230,199 @@ describe("on_turn_stop", function()
     end)
 end)
 
+describe("render", function()
+    local Text = require("mcphub.utils.text")
+    local blocked = { phase = "blocked", reason = "insert mode" }
+
+    local function text(state, label, now, stale)
+        return table.concat(
+            vim.tbl_map(function(chunk)
+                return chunk[1]
+            end, focus_gate.render(state, label, now or 0, stale)),
+            ""
+        )
+    end
+
+    it("names the file, its hunks and why it waits, in Comment", function()
+        local chunks = focus_gate.render(blocked, { name = "a.lua", hunks = 1 }, 0)
+        assert.are.same({ { "⏳ a.lua · 1 hunk · insert mode", "Comment" } }, chunks)
+        assert.is.equal("⏳ a.lua · 3 hunks · insert mode", text(blocked, { name = "a.lua", hunks = 3 }))
+    end)
+
+    it("shows the batch part only for a batch", function()
+        local label = { name = "a.lua", hunks = 3, batch = { 2, 3 } }
+        assert.is.equal("⏳ a.lua · 3 hunks · " .. Text.icons.file .. " 2/3 · insert mode", text(blocked, label))
+        assert.is_nil(text(blocked, { name = "a.lua", hunks = 3 }):find(Text.icons.file, 1, true))
+    end)
+
+    it("shows each reason as given", function()
+        for _, why in ipairs({ "chat unfocused", "chat in other tab", "operator pending" }) do
+            local shown = text({ phase = "blocked", reason = why }, { name = "a.lua", hunks = 1 })
+            assert.is.equal("⏳ a.lua · 1 hunk · " .. why, shown)
+        end
+    end)
+
+    it("counts down while settling", function()
+        local settling = { phase = "settling", settle_deadline = 1500 }
+        assert.is.equal("⏳ a.lua · 1 hunk · opens in 0.5s", text(settling, { name = "a.lua", hunks = 1 }, 1000))
+        assert.is.equal("⏳ a.lua · 1 hunk · opens in 0.0s", text(settling, { name = "a.lua", hunks = 1 }, 2000))
+    end)
+
+    it("flags a stale target in DiagnosticWarn", function()
+        local chunks = focus_gate.render(blocked, { name = "a.lua", hunks = 1 }, 0, true)
+        assert.are.same({ "file changed, may not apply", "DiagnosticWarn" }, chunks[#chunks])
+        assert.is.equal(
+            "⏳ a.lua · 1 hunk · insert mode · file changed, may not apply",
+            text(blocked, {
+                name = "a.lua",
+                hunks = 1,
+            }, 0, true)
+        )
+    end)
+end)
+
+describe("pending row", function()
+    local buffer = require("mcphub.native.neovim.utils.buffer")
+
+    local function never()
+        return focus_gate.resolve({ allow_in_modes = { "\19" }, settle_ms = 0 })
+    end
+
+    --- A `show_pending` that records the rows it is given and whether they were removed.
+    local function recorder()
+        local rows = {}
+        return rows,
+            function(row)
+                local entry = { row = row, removed = 0 }
+                rows[#rows + 1] = entry
+                return {
+                    remove = function()
+                        entry.removed = entry.removed + 1
+                    end,
+                }
+            end
+    end
+
+    local function text(entry)
+        return table.concat(
+            vim.tbl_map(function(chunk)
+                return chunk[1]
+            end, entry.row.render(vim.uv.now())),
+            ""
+        )
+    end
+
+    it("is not shown for a review that opens at once", function()
+        local rows, show = recorder()
+        focus_gate.wait({ config = focus_gate.resolve(nil), show_pending = show }, function() end)
+        assert.is.equal(0, #rows)
+    end)
+
+    it("is shown while the review waits and removed once on cancel", function()
+        local rows, show = recorder()
+        local handle = focus_gate.wait({
+            config = never(),
+            label = { name = "a.lua", hunks = 2 },
+            show_pending = show,
+        }, function() end, function() end)
+        assert.is.equal(1, #rows)
+        assert.is_truthy(text(rows[1]):find("⏳ a.lua · 2 hunks · ", 1, true))
+        handle:cancel("gone")
+        handle:close()
+        assert.is.equal(1, rows[1].removed)
+    end)
+
+    it("is removed before the review opens", function()
+        local chat = vim.api.nvim_create_buf(false, true)
+        local previous = vim.api.nvim_get_current_buf()
+        local rows, show = recorder()
+        local removed_at_open
+        focus_gate.wait({
+            config = focus_gate.resolve({ chat = "focused", settle_ms = 0 }),
+            chat_bufnr = chat,
+            label = { name = "a.lua", hunks = 1 },
+            show_pending = show,
+        }, function()
+            removed_at_open = rows[1].removed
+        end)
+        assert.is.equal("⏳ a.lua · 1 hunk · chat hidden", text(rows[1]))
+
+        vim.api.nvim_win_set_buf(0, chat)
+        vim.wait(1000, function()
+            return removed_at_open ~= nil
+        end, 10)
+        vim.api.nvim_win_set_buf(0, previous)
+        vim.api.nvim_buf_delete(chat, { force = true })
+        assert.is.equal(1, removed_at_open)
+    end)
+
+    it("flags the target while it differs from the reference, re-hashing only on change", function()
+        local bufnr = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "A", "B" })
+        local reference = buffer.content_hash(bufnr)
+        local rows, show = recorder()
+        local handle = focus_gate.wait({
+            config = never(),
+            bufnr = bufnr,
+            reference_hash = reference,
+            label = { name = "a.lua", hunks = 1 },
+            show_pending = show,
+        }, function() end)
+
+        local real_hash, hashes = buffer.content_hash, 0
+        buffer.content_hash = function(...)
+            hashes = hashes + 1
+            return real_hash(...)
+        end
+        local ok, err = pcall(function()
+            local flag = "file changed, may not apply"
+            assert.is_nil(text(rows[1]):find(flag, 1, true))
+            text(rows[1])
+            assert.is.equal(1, hashes)
+
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "A edited" })
+            assert.is_truthy(text(rows[1]):find(flag, 1, true))
+            text(rows[1])
+            assert.is.equal(2, hashes)
+
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "A" })
+            assert.is_nil(text(rows[1]):find(flag, 1, true))
+            assert.is.equal(3, hashes)
+        end)
+        buffer.content_hash = real_hash
+        handle:close()
+        vim.api.nvim_buf_delete(bufnr, { force = true })
+        if not ok then
+            error(err, 0)
+        end
+    end)
+end)
+
+describe("count_hunks", function()
+    it("counts the hunks the review shows", function()
+        local function block(id, found, found_lines, replace_lines)
+            return {
+                block_id = id,
+                location_result = { found = found, found_lines = found_lines, start_line = 1 },
+                replace_lines = replace_lines,
+                applied_start_line = 1,
+            }
+        end
+        local old = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12" }
+        local new = vim.deepcopy(old)
+        new[1], new[12] = "one", "twelve"
+        local blocks = {
+            block("b1", true, old, new),
+            block("b2", true, { "x" }, { "y" }),
+            block("b3", false, {}, { "z" }),
+        }
+        local ui = edit_ui.new(nil)
+        ui.state = { located_blocks = blocks }
+        assert.is.equal(3, edit_ui.count_hunks(blocks))
+        assert.is.equal(#ui:_generate_hunk_blocks(), edit_ui.count_hunks(blocks))
+    end)
+end)
+
 describe("EditUI seam", function()
     --- Start an `EditUI` session with `_open` stubbed out, so no window is touched,
     --- while spying on `focus_gate.wait`.

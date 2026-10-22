@@ -398,6 +398,7 @@ local apply_edit_tool = {
         local chat_bufnr = focus_gate.chat_bufnr(req.caller)
         -- One per call, so stopping the turn cancels whichever file's review is waiting.
         local on_gate = focus_gate.on_turn_stop(req.caller)
+        local show_pending = focus_gate.show_pending(req.caller)
         -- Both the user config and `auto_approve` reach the engine through the
         -- DRIVER, never through an opts table: `edit.apply` is deliberately
         -- opts-free so that no configuration path (notably
@@ -412,6 +413,7 @@ local apply_edit_tool = {
             end
             request.chat_bufnr = chat_bufnr
             request.on_gate = on_gate
+            request.show_pending = show_pending
             return ui_backend.drive_file(request, file_cb, config)
         end
         edit.apply(req.params or {}, drive_file, function(response)

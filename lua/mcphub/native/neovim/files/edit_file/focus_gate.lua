@@ -27,7 +27,7 @@ local DEFAULT_SETTLE_MS = 2000
 ---@field bufnr integer? The target buffer
 ---@field reference_hash string? sha256 the target must still match, for the pending row's staleness flag
 ---@field label MCPHub.FocusGate.Label? What the pending row shows
----@field show_pending (fun(row: table): { remove: fun() })? Draws the pending row; nil outside CodeCompanion
+---@field show_pending (fun(row: table): { remove: fun() }?)? Draws the pending row; nil outside CodeCompanion
 
 ---@class MCPHub.FocusGate.Handle
 ---@field waiting boolean Whether the review is still held back
@@ -222,6 +222,64 @@ local function blocked_by(opts)
     return nil
 end
 
+--- The hook that draws a waiting review's row in the chat, if the caller has one.
+---@param caller table? `req.caller` of a native tool call
+---@return (fun(row: table): { remove: fun() }?)?
+function M.show_pending(caller)
+    if type(caller) == "table" and type(caller.show_pending) == "function" then
+        return caller.show_pending
+    end
+    return nil
+end
+
+--- The pending row: what waits, and why or for how much longer.
+---@param state MCPHub.FocusGate.State
+---@param label MCPHub.FocusGate.Label?
+---@param now integer `vim.uv.now()`
+---@param stale boolean? Whether the target no longer matches what the edit was planned against
+---@return string[][] chunks
+function M.render(state, label, now, stale)
+    local parts = { "⏳ " .. (label and label.name ~= "" and label.name or "review") }
+    if label and label.hunks then
+        parts[#parts + 1] = label.hunks .. (label.hunks == 1 and " hunk" or " hunks")
+    end
+    if label and label.batch then
+        local Text = require("mcphub.utils.text")
+        parts[#parts + 1] = Text.icons.file .. " " .. label.batch[1] .. "/" .. label.batch[2]
+    end
+    if state.phase == "settling" and state.settle_deadline then
+        parts[#parts + 1] = ("opens in %.1fs"):format(math.max(0, state.settle_deadline - now) / 1000)
+    elseif state.reason then
+        parts[#parts + 1] = state.reason
+    end
+    local chunks = { { table.concat(parts, " · "), "Comment" } }
+    if stale then
+        chunks[#chunks + 1] = { " · ", "Comment" }
+        chunks[#chunks + 1] = { "file changed, may not apply", "DiagnosticWarn" }
+    end
+    return chunks
+end
+
+--- Whether the target has drifted from `opts.reference_hash`, re-hashing only when its
+--- `changedtick` moved: the row is redrawn far more often than the file is edited.
+---@param opts MCPHub.FocusGate.Opts
+---@return fun(): boolean
+local function staleness(opts)
+    local tick, stale = nil, false
+    return function()
+        local bufnr = opts.bufnr
+        if not (opts.reference_hash and bufnr and vim.api.nvim_buf_is_loaded(bufnr)) then
+            return false
+        end
+        local now = vim.api.nvim_buf_get_changedtick(bufnr)
+        if now ~= tick then
+            tick = now
+            stale = require("mcphub.native.neovim.utils.buffer").content_hash(bufnr) ~= opts.reference_hash
+        end
+        return stale
+    end
+end
+
 --- Hold a review back until it may take focus, then call `on_open`.
 ---
 --- When every condition holds on entry the review opens synchronously. Otherwise
@@ -267,6 +325,8 @@ function M.wait(opts, on_open, on_abort)
     -- Bumped whenever a settle timer starts or stops, so that a timer callback
     -- already queued on the main loop can tell it has been superseded.
     local generation = 0
+    ---@type { remove: fun() }?
+    local row
 
     local function stop_timer()
         generation = generation + 1
@@ -285,6 +345,10 @@ function M.wait(opts, on_open, on_abort)
         state.phase = "closed"
         stop_timer()
         pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
+        if row then
+            row.remove()
+            row = nil
+        end
         handle.waiting, handle.state = false, nil
         active = active - 1
         return true
@@ -358,6 +422,15 @@ function M.wait(opts, on_open, on_abort)
                 end,
             })
         end
+    end
+
+    if opts.show_pending then
+        local is_stale = staleness(opts)
+        row = opts.show_pending({
+            render = function(now)
+                return M.render(state, opts.label, now, is_stale())
+            end,
+        })
     end
 
     return handle

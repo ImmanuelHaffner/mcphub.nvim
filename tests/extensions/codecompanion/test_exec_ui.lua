@@ -532,4 +532,61 @@ T["output keys"]["gO off a label runs the global gO"] = function()
     eq(floats(), {})
 end
 
+T["pending row"] = new_set()
+
+---@param text string
+---@return MCPHub.ExecUI.Row row
+---@return { frames: integer } seen How often it was rendered
+local function fake_row(text)
+    local seen = { frames = 0 }
+    return {
+        render = function()
+            seen.frames = seen.frames + 1
+            return { { text .. " " .. seen.frames, "Comment" } }
+        end,
+    },
+        seen
+end
+
+T["pending row"]["is drawn above the label and redrawn until removed"] = function()
+    local row, seen = fake_row("waiting")
+    local handle = assert(exec_ui.attach_row(fake_tools(), row))
+    eq(progress_marks().progress, { LABEL_ROW - 2 })
+    eq(progress_marks().text, { "waiting 1" })
+    eq(
+        vim.wait(1000, function()
+            return seen.frames >= 3
+        end, 10),
+        true
+    )
+    eq(progress_marks().text, { "waiting " .. seen.frames })
+
+    handle.remove()
+    eq(vim.api.nvim_buf_get_extmarks(chat.buf, exec_ui.NS, 0, -1, {}), {})
+    eq(exec_ui._ticker_active(), false)
+    -- Removing twice is harmless.
+    handle.remove()
+end
+
+T["pending row"]["is no command: the label gets neither a registry entry nor the keys"] = function()
+    exec_ui.attach_row(fake_tools(), (fake_row("waiting")))
+    eq(exec_ui.registry[chat.buf], nil)
+    eq(vim.fn.maparg("<LocalLeader>k", "n", false, true).buffer, nil)
+end
+
+T["pending row"]["leaves a running job's progress line alone"] = function()
+    exec_ui.attach(fake_tools(), fake_job())
+    local handle = assert(exec_ui.attach_row(fake_tools(), (fake_row("waiting"))))
+    eq(#progress_marks().progress, 2)
+    handle.remove()
+    eq(#progress_marks().progress, 1)
+    eq(vim.startswith(progress_marks().text[1], "⏱ "), true)
+    eq(exec_ui._ticker_active(), true)
+end
+
+T["pending row"]["is a no-op against an unpatched CodeCompanion"] = function()
+    eq(exec_ui.attach_row(fake_tools({}), (fake_row("waiting"))), nil)
+    eq(vim.api.nvim_buf_get_extmarks(chat.buf, exec_ui.NS, 0, -1, {}), {})
+end
+
 return T

@@ -88,7 +88,7 @@ end
 function _G.probe.tool(input, defer, chat_bufnr)
     require("mcphub.state").config.builtin_tools = { apply_edit = { ui = { defer = defer } } }
     local tool = require("mcphub.native.neovim.files.apply_edit")[1]
-    _G.probe.response, _G.probe.jobs = nil, {}
+    _G.probe.response, _G.probe.jobs, _G.probe.rows = nil, {}, {}
     local res = {}
     function res:text(body)
         self.body = body
@@ -109,8 +109,37 @@ function _G.probe.tool(input, defer, chat_bufnr)
             register_job = function(job)
                 table.insert(_G.probe.jobs, job)
             end,
+            show_pending = function(row)
+                local entry = { row = row, removed = false }
+                table.insert(_G.probe.rows, entry)
+                return {
+                    remove = function()
+                        entry.removed = true
+                    end,
+                }
+            end,
         },
     }, res)
+end
+
+--- The pending rows the tool showed: their text now, and whether they were removed.
+function _G.probe.rows_seen()
+    return vim.tbl_map(function(entry)
+        local chunks = entry.row.render(vim.uv.now())
+        return {
+            text = table.concat(vim.tbl_map(function(chunk)
+                return chunk[1]
+            end, chunks), ""),
+            removed = entry.removed,
+        }
+    end, _G.probe.rows)
+end
+
+function _G.probe.await_rows(n)
+    vim.wait(5000, function()
+        return #_G.probe.rows >= n
+    end, 10)
+    return _G.probe.rows_seen()
 end
 
 function _G.probe.stop_turn()
@@ -572,6 +601,35 @@ T["an edit that never waits registers no stop hook"] = function()
     local path = call_tool({ "target.txt" }, NORMAL_ONLY)[1]
     eq(in_review(path), true)
     eq(child.lua_get("#_G.probe.jobs"), 0)
+    eq(child.lua_get("#_G.probe.rows"), 0)
+end
+
+T["each waiting file of a batch shows its row until its review opens"] = function()
+    local file = child.lua_get('require("mcphub.utils.text").icons.file')
+    child.type_keys("i")
+    local paths = call_tool({ "one.txt", "two.txt" }, NORMAL_ONLY)
+    eq(child.lua_get("_G.probe.rows_seen()"), {
+        { text = "⏳ one.txt · 1 hunk · " .. file .. " 1/2 · insert mode", removed = false },
+    })
+
+    child.type_keys("<Esc>")
+    eq(await_review(paths[1]), true)
+    eq(child.lua_get("_G.probe.rows_seen()")[1].removed, true)
+
+    -- Accepted while typing, so that the second file has to wait as well.
+    child.type_keys("i")
+    child.lua('vim.fn.maparg("ga", "n", false, true).callback()')
+    local rows = child.lua_get("_G.probe.await_rows(2)")
+    eq(rows[2], { text = "⏳ two.txt · 1 hunk · " .. file .. " 2/2 · insert mode", removed = false })
+
+    child.lua_func(function(p)
+        vim.api.nvim_buf_set_lines(vim.fn.bufnr(p), 0, 1, false, { "A edited" })
+    end, paths[2])
+    eq(vim.endswith(child.lua_get("_G.probe.rows_seen()")[2].text, " · file changed, may not apply"), true)
+
+    child.lua("_G.probe.stop_turn()")
+    eq(await_response().status, "partial")
+    eq(child.lua_get("_G.probe.rows[2].removed"), true)
 end
 
 return T

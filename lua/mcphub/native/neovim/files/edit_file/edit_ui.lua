@@ -282,7 +282,8 @@ end
 ---  `reference_hash` is the `content_hash` the blocks were located against; when the target no
 ---  longer matches it, nothing is applied and `on_stale(live_content)` (or `on_cancel`) is called.
 ---  `on_gate(handle)` receives the gate when the review has to wait, so that the caller can
----  cancel it; a review given up before it opened ends in `on_cancel(reason)`.
+---  cancel it; a review given up before it opened ends in `on_cancel(reason)`. While it waits,
+---  `show_pending(row)` draws its row, which names `batch = { index, total }` if set.
 function EditUI:start_interactive_editing(opts)
     -- Auto-approved edits are never held back: there is nothing for the user to look at.
     if opts.interactive == false then
@@ -295,6 +296,12 @@ function EditUI:start_interactive_editing(opts)
         chat_bufnr = opts.chat_bufnr,
         bufnr = bufnr,
         reference_hash = opts.reference_hash,
+        label = {
+            name = vim.fs.basename(opts.file_path or ""),
+            hunks = EditUI.count_hunks(opts.located_blocks or {}),
+            batch = opts.batch,
+        },
+        show_pending = opts.show_pending,
     }, function()
         self:_open(opts)
     end, opts.on_cancel)
@@ -418,22 +425,37 @@ function EditUI:_apply_all_changes()
     end
 end
 
+--- The hunks of a located block, as `vim.diff` indices; none for a block that was not found.
+---@return integer[][]
+local function diff_indices(located_block)
+    local location_result = located_block.location_result
+    if not location_result.found then
+        return {}
+    end
+    return vim.diff(
+        table.concat(location_result.found_lines, "\n") .. "\n",
+        table.concat(located_block.replace_lines, "\n") .. "\n",
+        { result_type = "indices", algorithm = "histogram", ctxlen = 3 }
+    ) or {} --[[@as integer[][] ]]
+end
+
+--- How many hunks a review of `located_blocks` will show, without touching any buffer.
+---@return integer
+function EditUI.count_hunks(located_blocks)
+    local n = 0
+    for _, located_block in ipairs(located_blocks) do
+        n = n + #diff_indices(located_block)
+    end
+    return n
+end
+
 ---Generate hunk blocks from located blocks for granular navigation
 ---@return DiffHunk[]
 function EditUI:_generate_hunk_blocks()
     self.state.hunk_blocks = {}
 
     for _, located_block in ipairs(self.state.located_blocks) do
-        -- Calculate precise diff hunks
-        local precise_diff_hunks = {}
-        local location_result = located_block.location_result
-        if location_result.found then
-            precise_diff_hunks = vim.diff(
-                table.concat(location_result.found_lines, "\n") .. "\n",
-                table.concat(located_block.replace_lines, "\n") .. "\n",
-                { result_type = "indices", algorithm = "histogram", ctxlen = 3 }
-            ) or {} --[[@as table<integer, integer>]]
-        end
+        local precise_diff_hunks = diff_indices(located_block)
         -- Process each precise_diff_hunk
         for hunk_index, hunk in ipairs(precise_diff_hunks) do
             local old_start_idx, old_count, new_start_idx, new_count = unpack(hunk)

@@ -922,6 +922,8 @@ function M.drive_file(request, file_cb, config)
         is_replacing_entire_file = false,
         chat_bufnr = request.chat_bufnr,
         on_gate = request.on_gate,
+        show_pending = request.show_pending,
+        batch = (request.total or 1) > 1 and { request.index, request.total } or nil,
         file_path = request.file_path,
         located_blocks = located_blocks,
         original_content = request.original_content,

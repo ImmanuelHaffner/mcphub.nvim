@@ -230,14 +230,18 @@ local DEFAULT_REFRESH_MS = 500
 ---@type table<integer, table<integer, MCPHub.Exec.Job>>
 M.registry = {}
 
+---@class MCPHub.ExecUI.Row
+---@field render fun(now: integer): string[][] The row's chunks at `vim.uv.now()`
+
 ---@class MCPHub.ExecUI.Progress
 ---@field bufnr integer
----@field key integer Extmark on the label row, which keys the job in `M.registry`
----@field mark integer Extmark carrying the progress line
----@field job MCPHub.Exec.Job
+---@field mark integer Extmark carrying the line
+---@field key? integer Extmark on the label row, which keys the job in `M.registry`
+---@field job? MCPHub.Exec.Job The command whose progress the line shows
+---@field row? MCPHub.ExecUI.Row A line that is not a command's, drawn until it is removed
 
---- Progress lines still to redraw: their job runs, or exited since the last
---- redraw.
+--- Lines still to redraw: rows not yet removed, and progress lines whose job
+--- runs, or exited since the last redraw.
 ---@type MCPHub.ExecUI.Progress[]
 local live = {}
 
@@ -349,7 +353,7 @@ end
 ---@return string?
 local function hint(entry)
     local win = vim.api.nvim_get_current_win()
-    if not cancellable(entry.job) or vim.api.nvim_win_get_buf(win) ~= entry.bufnr then
+    if not (entry.job and cancellable(entry.job)) or vim.api.nvim_win_get_buf(win) ~= entry.bufnr then
         return nil
     end
     local pos = vim.api.nvim_buf_get_extmark_by_id(entry.bufnr, M.NS, entry.key, {})
@@ -370,28 +374,33 @@ local function draw(entry, now)
     if not pos[1] then
         return false
     end
+    local chunks = entry.row and entry.row.render(now) or M.render(entry.job, now, hint(entry))
     vim.api.nvim_buf_set_extmark(entry.bufnr, M.NS, pos[1], 0, {
         id = entry.mark,
-        virt_lines = { M.render(entry.job, now, hint(entry)) },
+        virt_lines = { chunks },
     })
     return true
 end
 
---- Redraw every live progress line, the final one for a job that has exited,
---- and stop once none is left.
-local function tick()
-    local now = vim.uv.now()
-    for i = #live, 1, -1 do
-        local entry = live[i]
-        if not draw(entry, now) or entry.job.exited then
-            table.remove(live, i)
-        end
-    end
+local function stop_ticker_if_idle()
     if #live == 0 and ticker then
         ticker:stop()
         ticker:close()
         ticker = nil
     end
+end
+
+--- Redraw every live line, the final one for a job that has exited, and stop
+--- once none is left.
+local function tick()
+    local now = vim.uv.now()
+    for i = #live, 1, -1 do
+        local entry = live[i]
+        if not draw(entry, now) or (entry.job and entry.job.exited) then
+            table.remove(live, i)
+        end
+    end
+    stop_ticker_if_idle()
 end
 
 local function start_ticker()
@@ -485,18 +494,38 @@ local function setup_buffer(bufnr)
     })
 end
 
+--- The running tool's label, or nil against a CodeCompanion without `get_tool_label`.
+---@param tools table CodeCompanion's tools coordinator
+---@return { bufnr: integer, row: integer, text: string }?
+local function tool_label(tools)
+    local orchestrator = tools and tools.chat and tools.chat.tool_orchestrator
+    if not (orchestrator and orchestrator.get_tool_label) then
+        return nil
+    end
+    local ok, label = pcall(orchestrator.get_tool_label, orchestrator)
+    return ok and label or nil
+end
+
+--- Show `chunks` directly above the label on `row`, and redraw them from then on.
+---@param entry MCPHub.ExecUI.Progress Without `mark`, which this sets
+---@param row integer The label's row
+---@param chunks string[][]
+local function show(entry, row, chunks)
+    -- A closed fold hides the decorations on its rows, so the line hangs off the
+    -- blank row CodeCompanion writes before every tool block.
+    entry.mark = vim.api.nvim_buf_set_extmark(entry.bufnr, M.NS, row - 1, 0, { virt_lines = { chunks } })
+    table.insert(live, entry)
+    start_ticker()
+end
+
 --- Register `job` under its tool's label, where the cancel key finds it, and
 --- show its progress line directly above the label. Does nothing against a
 --- CodeCompanion without `get_tool_label`.
 ---@param tools table CodeCompanion's tools coordinator
 ---@param job MCPHub.Exec.Job
 function M.attach(tools, job)
-    local orchestrator = tools and tools.chat and tools.chat.tool_orchestrator
-    if not (orchestrator and orchestrator.get_tool_label) then
-        return
-    end
-    local ok, label = pcall(orchestrator.get_tool_label, orchestrator)
-    if not (ok and label) then
+    local label = tool_label(tools)
+    if not label then
         return
     end
     local bufnr, row = label.bufnr, label.row
@@ -505,14 +534,38 @@ function M.attach(tools, job)
     local key = vim.api.nvim_buf_set_extmark(bufnr, M.NS, row, 0, { right_gravity = false })
     M.registry[bufnr] = M.registry[bufnr] or {}
     M.registry[bufnr][key] = job
-    -- A closed fold hides the decorations on its rows, so the line hangs off the
-    -- blank row CodeCompanion writes before every tool block.
-    local mark = vim.api.nvim_buf_set_extmark(bufnr, M.NS, row - 1, 0, {
-        virt_lines = { M.render(job, vim.uv.now()) },
-    })
-    table.insert(live, { bufnr = bufnr, key = key, mark = mark, job = job })
+    show({ bufnr = bufnr, key = key, job = job }, row, M.render(job, vim.uv.now()))
     setup_buffer(bufnr)
-    start_ticker()
+end
+
+--- Show `row` directly above the running tool's label and redraw it on the
+--- progress lines' timer until it is removed. Unlike a job, a row is nothing
+--- the cancel key acts on.
+---@param tools table CodeCompanion's tools coordinator
+---@param row MCPHub.ExecUI.Row
+---@return { remove: fun() }? handle nil against a CodeCompanion without `get_tool_label`
+function M.attach_row(tools, row)
+    local label = tool_label(tools)
+    if not label then
+        return nil
+    end
+    ---@type MCPHub.ExecUI.Progress
+    local entry = { bufnr = label.bufnr, row = row, mark = -1 }
+    show(entry, label.row, row.render(vim.uv.now()))
+    return {
+        remove = function()
+            for i, e in ipairs(live) do
+                if e == entry then
+                    table.remove(live, i)
+                    break
+                end
+            end
+            if vim.api.nvim_buf_is_valid(entry.bufnr) then
+                pcall(vim.api.nvim_buf_del_extmark, entry.bufnr, M.NS, entry.mark)
+            end
+            stop_ticker_if_idle()
+        end,
+    }
 end
 
 --- Whether the progress lines' redraw timer is running; for tests.
