@@ -597,35 +597,72 @@ T["a stop after the review opened leaves the review open"] = function()
     eq(await_response().status, "applied")
 end
 
-T["an edit that never waits registers no stop hook"] = function()
+T["an edit that never waits registers no stop hook, but shows its row"] = function()
     local path = call_tool({ "target.txt" }, NORMAL_ONLY)[1]
     eq(in_review(path), true)
     eq(child.lua_get("#_G.probe.jobs"), 0)
-    eq(child.lua_get("#_G.probe.rows"), 0)
+    eq(child.lua_get("_G.probe.rows_seen()"), { { text = "📝 target.txt · 0/1 hunk", removed = false } })
 end
 
-T["each waiting file of a batch shows its row until its review opens"] = function()
+T["an open review's row counts its decided hunks until the last one"] = function()
+    local path = fixture("target.txt", { "A", "B", "C" })
+    local fp = child.lua_get("_G.probe.fingerprint(...)", { path })
+    local function op(line, content)
+        return {
+            kind = "replace_range",
+            path = path,
+            baseline_fingerprint = fp,
+            anchor = { by = "line_range", start = line, ["end"] = line },
+            content = content,
+            indent = "preserve",
+        }
+    end
+    child.lua_func(function(input, d)
+        _G.probe.tool(input, d)
+    end, { ops = { op(1, "A2"), op(3, "C2") } }, NORMAL_ONLY)
+    eq(in_review(path), true)
+    eq(child.lua_get("_G.probe.rows_seen()"), { { text = "📝 target.txt · 0/2 hunks", removed = false } })
+
+    child.type_keys(".")
+    eq(child.lua_get("_G.probe.rows_seen()"), { { text = "📝 target.txt · 1/2 hunks", removed = false } })
+
+    child.type_keys(".")
+    eq(child.lua_get("_G.probe.rows_seen()")[1].removed, true)
+    eq(await_response().status, "applied")
+end
+
+T["each file of a batch shows its row from waiting until its last hunk is decided"] = function()
     local file = child.lua_get('require("mcphub.utils.text").icons.file')
     child.type_keys("i")
     local paths = call_tool({ "one.txt", "two.txt" }, NORMAL_ONLY)
     eq(child.lua_get("_G.probe.rows_seen()"), {
-        { text = "⏳ one.txt · 1 hunk · " .. file .. " 1/2 · insert mode", removed = false },
+        { text = "🚫 one.txt · 1 hunk · " .. file .. " 1/2 · \u{E0B6}insert mode\u{E0B4}", removed = false },
     })
 
     child.type_keys("<Esc>")
     eq(await_review(paths[1]), true)
-    eq(child.lua_get("_G.probe.rows_seen()")[1].removed, true)
+    eq(
+        child.lua_get("_G.probe.rows_seen()")[1],
+        { text = "📝 one.txt · 0/1 hunk · " .. file .. " 1/2", removed = false }
+    )
 
     -- Accepted while typing, so that the second file has to wait as well.
     child.type_keys("i")
     child.lua('vim.fn.maparg("ga", "n", false, true).callback()')
     local rows = child.lua_get("_G.probe.await_rows(2)")
-    eq(rows[2], { text = "⏳ two.txt · 1 hunk · " .. file .. " 2/2 · insert mode", removed = false })
+    eq(rows[1].removed, true)
+    eq(
+        rows[2],
+        { text = "🚫 two.txt · 1 hunk · " .. file .. " 2/2 · \u{E0B6}insert mode\u{E0B4}", removed = false }
+    )
 
     child.lua_func(function(p)
         vim.api.nvim_buf_set_lines(vim.fn.bufnr(p), 0, 1, false, { "A edited" })
     end, paths[2])
-    eq(vim.endswith(child.lua_get("_G.probe.rows_seen()")[2].text, " · file changed, may not apply"), true)
+    eq(
+        vim.endswith(child.lua_get("_G.probe.rows_seen()")[2].text, " · \u{E0B6}file changed, may not apply\u{E0B4}"),
+        true
+    )
 
     child.lua("_G.probe.stop_turn()")
     eq(await_response().status, "partial")

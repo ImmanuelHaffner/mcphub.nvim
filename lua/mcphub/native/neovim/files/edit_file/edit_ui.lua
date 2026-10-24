@@ -184,6 +184,9 @@ end
 ---@field highlights table Highlight management
 ---@field defer MCPHub.FocusGate.Config When the review may take focus, resolved from `config.defer`
 ---@field gate MCPHub.FocusGate.Handle? The gate holding an interactive review back
+---@field label MCPHub.FocusGate.Label? What an interactive review's row names
+---@field show_pending (fun(row: table): { remove: fun() }?)? Draws the row; nil outside CodeCompanion
+---@field row { remove: fun() }|false|nil The row while shown, false once it can no longer be
 local EditUI = {}
 EditUI.__index = EditUI
 
@@ -282,8 +285,9 @@ end
 ---  `reference_hash` is the `content_hash` the blocks were located against; when the target no
 ---  longer matches it, nothing is applied and `on_stale(live_content)` (or `on_cancel`) is called.
 ---  `on_gate(handle)` receives the gate when the review has to wait, so that the caller can
----  cancel it; a review given up before it opened ends in `on_cancel(reason)`. While it waits,
----  `show_pending(row)` draws its row, which names `batch = { index, total }` if set.
+---  cancel it; a review given up before it opened ends in `on_cancel(reason)`. From when it starts
+---  waiting or opens until its last hunk is decided, `show_pending(row)` draws its row, which names
+---  `batch = { index, total }` if set.
 function EditUI:start_interactive_editing(opts)
     -- Auto-approved edits are never held back: there is nothing for the user to look at.
     if opts.interactive == false then
@@ -291,23 +295,58 @@ function EditUI:start_interactive_editing(opts)
     end
     -- Loaded now, so that the gate can watch the buffer the reference was taken from.
     local bufnr = opts.file_path and require("mcphub.native.neovim.utils.buffer").load_hidden(opts.file_path)
+    self.label = {
+        name = vim.fs.basename(opts.file_path or ""),
+        hunks = EditUI.count_hunks(opts.located_blocks or {}),
+        batch = opts.batch,
+    }
+    self.show_pending = opts.show_pending
     self.gate = focus_gate.wait({
         config = self.defer,
         chat_bufnr = opts.chat_bufnr,
         bufnr = bufnr,
         reference_hash = opts.reference_hash,
-        label = {
-            name = vim.fs.basename(opts.file_path or ""),
-            hunks = EditUI.count_hunks(opts.located_blocks or {}),
-            batch = opts.batch,
-        },
-        show_pending = opts.show_pending,
     }, function()
         self:_open(opts)
     end, opts.on_cancel)
-    if self.gate.waiting and opts.on_gate then
-        opts.on_gate(self.gate)
+    if self.gate.waiting then
+        self:_show_row()
+        if opts.on_gate then
+            opts.on_gate(self.gate)
+        end
     end
+end
+
+--- Show the review's row in the chat, once: it tells why the review waits while it
+--- does, and how many of its hunks are decided once it is open.
+function EditUI:_show_row()
+    if self.row ~= nil or not self.show_pending then
+        return
+    end
+    self.row = self.show_pending({
+        render = function(now)
+            local gate = self.gate
+            if gate and gate.waiting then
+                return focus_gate.render(gate.state, self.label, now, gate.stale())
+            end
+            local state = self.state
+            local total = state and state.hunk_blocks and #state.hunk_blocks or self.label.hunks
+            local decided = state and vim.tbl_count(state.completed_hunks) or total
+            return focus_gate.render(
+                { phase = "reviewing", decided = decided },
+                vim.tbl_extend("force", self.label, { hunks = total }),
+                now
+            )
+        end,
+    }) or false
+end
+
+--- Take the review's row out of the chat for good.
+function EditUI:_remove_row()
+    if self.row then
+        self.row.remove()
+    end
+    self.row = false
 end
 
 -- Open the review: show the file, apply the changes and highlight them
@@ -391,7 +430,9 @@ function EditUI:_open(opts)
     end
 
     self:_update_hints()
+    self:_show_row()
 end
+
 -- Apply all changes from located blocks to the buffer
 function EditUI:_apply_all_changes()
     local base_line_offset = 0
@@ -1354,6 +1395,7 @@ function EditUI:_complete_session()
         return
     end
     self.state.has_completed = true
+    self:_remove_row()
     self:write_if_modified()
     vim.schedule(function()
         local origin_winnr = self.state.origin_winnr
@@ -1626,6 +1668,7 @@ end
 
 -- Cleanup UI resources
 function EditUI:cleanup()
+    self:_remove_row()
     -- A review still held back has no state yet; dropping it must not report a cancel,
     -- since cleanup is what the cancel path itself ends in.
     if self.gate then

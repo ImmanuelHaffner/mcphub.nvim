@@ -77,7 +77,7 @@
 --- @field total            integer   Number of files in the batch.
 --- @field chat_bufnr       integer?  The CodeCompanion chat that made the call; set by the tool's driver, not by the applier.
 --- @field on_gate          (fun(handle: MCPHub.FocusGate.Handle))?  Receives the file's gate when its review has to wait; set by the tool's driver.
---- @field show_pending     (fun(row: table): { remove: fun() }?)?  Draws the row of a waiting review; set by the tool's driver.
+--- @field show_pending     (fun(row: table): { remove: fun() }?)?  Draws the row of an interactive review; set by the tool's driver.
 
 --- Per-file outcome delivered by `drive_file` via its `file_cb`.
 ---

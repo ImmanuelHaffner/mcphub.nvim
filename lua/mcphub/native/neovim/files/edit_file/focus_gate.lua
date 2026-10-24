@@ -18,19 +18,18 @@ local DEFAULT_SETTLE_MS = 2000
 
 ---@class MCPHub.FocusGate.Label
 ---@field name string File name, `vim.fs.basename` of the path
----@field hunks integer Hunks the review will show
+---@field hunks integer Hunks the review shows
 ---@field batch { [1]: integer, [2]: integer }? Position and size of the batch; nil for a single file
 
 ---@class MCPHub.FocusGate.Opts
 ---@field config MCPHub.FocusGate.Config
 ---@field chat_bufnr integer? The invoking chat; nil: the chat condition holds vacuously
 ---@field bufnr integer? The target buffer
----@field reference_hash string? sha256 the target must still match, for the pending row's staleness flag
----@field label MCPHub.FocusGate.Label? What the pending row shows
----@field show_pending (fun(row: table): { remove: fun() }?)? Draws the pending row; nil outside CodeCompanion
+---@field reference_hash string? sha256 the target must still match, for the staleness flag
 
 ---@class MCPHub.FocusGate.Handle
 ---@field waiting boolean Whether the review is still held back
+---@field stale fun(): boolean Whether the target differs from `reference_hash`; never for a review that did not wait
 ---@field cancel fun(self: MCPHub.FocusGate.Handle, reason: string) Give up on the review and report `reason`
 ---@field close fun(self: MCPHub.FocusGate.Handle) Give up on the review silently, e.g. while cleaning up
 ---@field state MCPHub.FocusGate.State? Why the review waits; nil once it no longer does
@@ -222,7 +221,7 @@ local function blocked_by(opts)
     return nil
 end
 
---- The hook that draws a waiting review's row in the chat, if the caller has one.
+--- The hook that draws a review's row in the chat, if the caller has one.
 ---@param caller table? `req.caller` of a native tool call
 ---@return (fun(row: table): { remove: fun() }?)?
 function M.show_pending(caller)
@@ -232,30 +231,52 @@ function M.show_pending(caller)
     return nil
 end
 
---- The pending row: what waits, and why or for how much longer.
----@param state MCPHub.FocusGate.State
+--- A review's row: what is reviewed, and why it waits, for how much longer, or how far it got.
+---@param state MCPHub.FocusGate.State|{ phase: "reviewing", decided: integer }
 ---@param label MCPHub.FocusGate.Label?
 ---@param now integer `vim.uv.now()`
 ---@param stale boolean? Whether the target no longer matches what the edit was planned against
 ---@return string[][] chunks
 function M.render(state, label, now, stale)
-    local parts = { "⏳ " .. (label and label.name ~= "" and label.name or "review") }
+    local Text = require("mcphub.utils.text")
+    local settling = state.phase == "settling" and state.settle_deadline
+    local reviewing = state.phase == "reviewing"
+    local items = {}
+    local function plain(text, hl)
+        items[#items + 1] = { { text, hl or "Comment" } }
+    end
+    local function pill(text)
+        items[#items + 1] = {
+            { "\u{E0B6}", Text.highlights.error },
+            { text, Text.highlights.error_fill },
+            { "\u{E0B4}", Text.highlights.error },
+        }
+    end
+
+    local icon = reviewing and "📝 " or settling and "⏳ " or "🚫 "
+    plain(icon .. (label and label.name ~= "" and label.name or "review"))
     if label and label.hunks then
-        parts[#parts + 1] = label.hunks .. (label.hunks == 1 and " hunk" or " hunks")
+        local count = reviewing and (state.decided .. "/" .. label.hunks) or tostring(label.hunks)
+        plain(count .. (label.hunks == 1 and " hunk" or " hunks"))
     end
     if label and label.batch then
-        local Text = require("mcphub.utils.text")
-        parts[#parts + 1] = Text.icons.file .. " " .. label.batch[1] .. "/" .. label.batch[2]
+        plain(Text.icons.file .. " " .. label.batch[1] .. "/" .. label.batch[2], "Directory")
     end
-    if state.phase == "settling" and state.settle_deadline then
-        parts[#parts + 1] = ("opens in %.1fs"):format(math.max(0, state.settle_deadline - now) / 1000)
+    if settling then
+        plain(("opens in %.1fs"):format(math.max(0, state.settle_deadline - now) / 1000))
     elseif state.reason then
-        parts[#parts + 1] = state.reason
+        pill(state.reason)
     end
-    local chunks = { { table.concat(parts, " · "), "Comment" } }
     if stale then
-        chunks[#chunks + 1] = { " · ", "Comment" }
-        chunks[#chunks + 1] = { "file changed, may not apply", "DiagnosticWarn" }
+        pill("file changed, may not apply")
+    end
+
+    local chunks = {}
+    for i, item in ipairs(items) do
+        if i > 1 then
+            chunks[#chunks + 1] = { " · ", "Comment" }
+        end
+        vim.list_extend(chunks, item)
     end
     return chunks
 end
@@ -299,6 +320,9 @@ function M.wait(opts, on_open, on_abort)
         on_open()
         return {
             waiting = false,
+            stale = function()
+                return false
+            end,
             cancel = function() end,
             close = function() end,
         }
@@ -313,6 +337,7 @@ function M.wait(opts, on_open, on_abort)
     local handle = {
         waiting = true,
         state = state,
+        stale = staleness(opts),
         cancel = function(_, why)
             if close() and on_abort then
                 on_abort(why)
@@ -325,8 +350,6 @@ function M.wait(opts, on_open, on_abort)
     -- Bumped whenever a settle timer starts or stops, so that a timer callback
     -- already queued on the main loop can tell it has been superseded.
     local generation = 0
-    ---@type { remove: fun() }?
-    local row
 
     local function stop_timer()
         generation = generation + 1
@@ -345,10 +368,6 @@ function M.wait(opts, on_open, on_abort)
         state.phase = "closed"
         stop_timer()
         pcall(vim.api.nvim_del_augroup_by_id, state.augroup)
-        if row then
-            row.remove()
-            row = nil
-        end
         handle.waiting, handle.state = false, nil
         active = active - 1
         return true
@@ -422,15 +441,6 @@ function M.wait(opts, on_open, on_abort)
                 end,
             })
         end
-    end
-
-    if opts.show_pending then
-        local is_stale = staleness(opts)
-        row = opts.show_pending({
-            render = function(now)
-                return M.render(state, opts.label, now, is_stale())
-            end,
-        })
     end
 
     return handle
