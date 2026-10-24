@@ -614,6 +614,9 @@ function M.open_server_editor(opts)
         position = "center", -- Always use center positioning for server editor
         go_to_placeholder = opts.go_to_placeholder,
         virtual_lines = opts.virtual_lines,
+        -- Opened from the hub float (e.g. the Marketplace); at the default zindex
+        -- the editor would share its layer and intersect it.
+        zindex = (vim.api.nvim_win_get_config(0).zindex or 50) + 1,
         validate = function(content)
             local result = M.parse_config_from_json(content)
             if not result.ok then
