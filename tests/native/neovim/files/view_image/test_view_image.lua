@@ -13,6 +13,7 @@ local image_cache = require("mcphub.utils.image_cache")
 local mcphub = require("mcphub")
 local paths = require("mcphub.native.neovim.files.view_image.paths")
 local prompt = require("mcphub.utils.prompt")
+local resize = require("mcphub.native.neovim.files.view_image.resize")
 local view_image = require("mcphub.native.neovim.files.view_image")
 
 local FILES_MODULE = "mcphub.native.neovim.files"
@@ -273,23 +274,48 @@ T["handler"]["does not take a shared prefix for containment"] = function()
     expect_error(result, err, { "is outside the chat's working directory" })
 end
 
-T["handler"]["refuses an image over the long-edge cap"] = function()
+--- Stub the resize backend away for the rest of the case.
+local function without_backend()
+    local real_backend = resize.backend
+    ---@diagnostic disable-next-line: duplicate-set-field
+    resize.backend = function()
+        return nil
+    end
+    MiniTest.finally(function()
+        resize.backend = real_backend
+    end)
+end
+
+T["handler"]["without a backend, refuses an image over the long-edge cap"] = function()
+    without_backend()
     local dir = tempdir()
     write(vim.fs.joinpath(dir, "wide.png"), png(3000, 100))
 
     local result, err = call({ path = "wide.png" }, chat_caller(dir))
 
-    expect_error(result, err, { "3000", "2576" })
+    expect_error(result, err, { "3000", "2576", "`sips` or ImageMagick" })
 end
 
-T["handler"]["refuses an image over the base64 cap"] = function()
+T["handler"]["without a backend, refuses an image over the base64 cap"] = function()
+    without_backend()
     local dir = tempdir()
     -- 3,750,001 bytes encode to 5,000,004 bytes of base64
     write(vim.fs.joinpath(dir, "heavy.png"), png(100, 100, 3750001))
 
     local result, err = call({ path = "heavy.png" }, chat_caller(dir))
 
-    expect_error(result, err, { "5000004", "5000000" })
+    expect_error(result, err, { "5000004", "5000000", "`sips` or ImageMagick" })
+end
+
+T["handler"]["without a backend, still sends an in-cap image"] = function()
+    without_backend()
+    local dir = tempdir()
+    write(vim.fs.joinpath(dir, "x.png"), png(10, 10))
+
+    local result = assert(call({ path = "x.png" }, chat_caller(dir)))
+
+    eq(result.isError, nil)
+    eq(result.content[2].mimeType, "image/png")
 end
 
 T["handler"]["refuses a file that is not an image"] = function()

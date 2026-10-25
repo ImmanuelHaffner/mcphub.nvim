@@ -4,6 +4,7 @@
 local State = require("mcphub.state")
 local header = require("mcphub.native.neovim.files.view_image.header")
 local paths = require("mcphub.native.neovim.files.view_image.paths")
+local resize = require("mcphub.native.neovim.files.view_image.resize")
 
 local M = {}
 
@@ -44,11 +45,36 @@ end
 --- limit on an image's base64.
 M.MAX_LONG_EDGE = 2576
 M.MAX_BASE64_BYTES = 5000000
+--- How many times an image is shrunk to fit the base64 cap before giving up.
+M.MAX_ATTEMPTS = 3
 
 ---@param bytes integer
 ---@return integer
 local function base64_size(bytes)
     return 4 * math.ceil(bytes / 3)
+end
+
+--- The long edge to try next for an image whose base64 is `encoded` bytes at
+--- long edge `edge`: the area scaled to the cap, with a margin for encoders
+--- that do not shrink in proportion.
+---@param edge integer
+---@param encoded integer
+---@return integer
+local function next_edge(edge, encoded)
+    return math.floor(edge * 0.9 * math.sqrt(M.MAX_BASE64_BYTES / encoded))
+end
+
+---@param path string
+---@return string|nil b64
+---@return string|nil err
+local function read_base64(path)
+    local file, err = io.open(path, "rb")
+    if not file then
+        return nil, err
+    end
+    local bytes = file:read("*a")
+    file:close()
+    return vim.base64.encode(bytes)
 end
 
 --- The line that tells the model what it is looking at.
@@ -64,6 +90,74 @@ function M.geometry(given, info, b64_bytes)
         info.height,
         b64_bytes
     )
+end
+
+--- The line for an image that was shrunk before it was sent.
+---@param given string
+---@param info MCPHub.ImageHeader The original
+---@param sent MCPHub.ImageHeader What was sent
+---@param b64_bytes integer
+---@return string
+function M.resized_geometry(given, info, sent, b64_bytes)
+    return ("Image `%s`: %s, %d×%d, sent as %s %d×%d (scale %.3f, %d bytes base64)."):format(
+        given,
+        info.mime,
+        info.width,
+        info.height,
+        sent.mime,
+        sent.width,
+        sent.height,
+        sent.width / info.width,
+        b64_bytes
+    )
+end
+
+--- Shrink the image until it fits both caps, then send it. Each attempt starts
+--- from the original, so the losses of a re-encoded JPEG do not compound.
+---@param target MCPHub.ViewImagePath
+---@param info MCPHub.ImageHeader
+---@param encoded integer The original's size as base64
+---@param res ToolResponse
+local function send_resized(target, info, encoded, res)
+    local long_edge = math.max(info.width, info.height)
+    local function attempt(edge, n)
+        resize.resize(target.real, info, edge, function(out, err)
+            local ok, failure = pcall(function()
+                if not out then
+                    return res:error(("%s: %s"):format(target.given, err))
+                end
+                local b64, read_err = read_base64(out.path)
+                os.remove(out.path)
+                if not b64 then
+                    return res:error(("%s: cannot read the resized image: %s"):format(target.given, read_err))
+                end
+                if #b64 <= M.MAX_BASE64_BYTES then
+                    local line = M.resized_geometry(target.given, info, out.header, #b64)
+                    return res:text(line):image(b64, out.header.mime):send()
+                end
+                local smaller = next_edge(math.max(out.header.width, out.header.height), #b64)
+                if n >= M.MAX_ATTEMPTS or smaller < 1 then
+                    return res:error(
+                        ("%s is %d×%d and %d bytes as base64; shrunk to %d×%d it is still %d bytes, over the %d byte limit"):format(
+                            target.given,
+                            info.width,
+                            info.height,
+                            encoded,
+                            out.header.width,
+                            out.header.height,
+                            #b64,
+                            M.MAX_BASE64_BYTES
+                        )
+                    )
+                end
+                attempt(smaller, n + 1)
+            end)
+            if not ok then
+                res:error(("%s: %s"):format(target.given, failure))
+            end
+        end)
+    end
+    attempt(long_edge > M.MAX_LONG_EDGE and M.MAX_LONG_EDGE or next_edge(long_edge, encoded), 1)
 end
 
 ---@param req ToolRequest
@@ -83,38 +177,36 @@ function M.handler(req, res)
         return res:error(("%s: %s"):format(target.given, header_err))
     end
     local long_edge = math.max(info.width, info.height)
-    if long_edge > M.MAX_LONG_EDGE then
+    local stat = vim.uv.fs_stat(target.real)
+    local encoded = base64_size(stat and stat.size or 0)
+
+    if long_edge <= M.MAX_LONG_EDGE and encoded <= M.MAX_BASE64_BYTES then
+        local b64, read_err = read_base64(target.real)
+        if not b64 then
+            return res:error(("cannot open %s: %s"):format(target.given, read_err))
+        end
+        return res:text(M.geometry(target.given, info, #b64)):image(b64, info.mime):send()
+    end
+
+    if not resize.backend() then
         return res:error(
-            ("%s is %d×%d: its long edge of %d px exceeds the %d px limit"):format(
+            ("%s is %d×%d and %d bytes as base64, over the %d px or %d byte limit, and shrinking it needs `sips` or ImageMagick, neither of which is installed"):format(
                 target.given,
                 info.width,
                 info.height,
-                long_edge,
-                M.MAX_LONG_EDGE
+                encoded,
+                M.MAX_LONG_EDGE,
+                M.MAX_BASE64_BYTES
             )
         )
     end
-    local stat = vim.uv.fs_stat(target.real)
-    local encoded_size = base64_size(stat and stat.size or 0)
-    if encoded_size > M.MAX_BASE64_BYTES then
-        return res:error(
-            ("%s is %d bytes as base64, over the %d byte limit"):format(target.given, encoded_size, M.MAX_BASE64_BYTES)
-        )
-    end
-
-    local file, open_err = io.open(target.real, "rb")
-    if not file then
-        return res:error(("cannot open %s: %s"):format(target.given, open_err))
-    end
-    local bytes = file:read("*a")
-    file:close()
-    local b64 = vim.base64.encode(bytes)
-    return res:text(M.geometry(target.given, info, #b64)):image(b64, info.mime):send()
+    -- Answers from the backend's callback, so a resize never blocks the editor
+    send_resized(target, info, encoded, res)
 end
 
 M.definition = {
     name = "view_image",
-    description = "Show yourself an image file, so you can look at it. Supports PNG, JPEG, GIF and WebP.",
+    description = "Show yourself an image file, so you can look at it. Supports PNG, JPEG, GIF and WebP; an image over 2576 px on its long edge or 5 MB is downscaled first, and the result names the size that was sent.",
     inputSchema = M.input_schema,
     label = M.label,
     call_noun = "image",
