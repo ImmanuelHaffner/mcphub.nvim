@@ -7,6 +7,7 @@ local edit_file_tool = require("mcphub.native.neovim.files.edit_file")
 local environment_resource = require("mcphub.native.neovim.files.environment")
 local file_tools = require("mcphub.native.neovim.files.operations")
 local search_tools = require("mcphub.native.neovim.files.search")
+local view_image = require("mcphub.native.neovim.files.view_image")
 local write_tool = require("mcphub.native.neovim.files.write")
 
 mcphub.add_resource("neovim", buffer_resource)
@@ -24,3 +25,6 @@ end
 
 mcphub.add_tool("neovim", write_tool)
 mcphub.add_tool("neovim", edit_file_tool)
+if view_image.enabled() then
+    mcphub.add_tool("neovim", view_image.definition)
+end

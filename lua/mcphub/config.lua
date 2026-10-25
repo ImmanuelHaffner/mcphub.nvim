@@ -117,6 +117,10 @@ local defaults = {
                 output = { "K", "gO" },
             },
         },
+        ---@type MCPHub.ViewImageConfig
+        view_image = {
+            enabled = false, -- Register the `view_image` tool in the `neovim` server; read when the hub starts
+        },
     },
     --- Custom function to parse json file (e.g `require'json5'.parse` from `https://github.com/Joakker/lua-json5 to parse json5 syntax for .vscode/mcp.json like files)
     ---@type function | nil
