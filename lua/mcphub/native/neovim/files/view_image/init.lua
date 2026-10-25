@@ -2,6 +2,7 @@
 --- from `files/init.lua`, which registers it only when it is enabled, so the
 --- definition can be exercised without a running hub.
 local State = require("mcphub.state")
+local confirmation = require("mcphub.native.utils.confirmation")
 local header = require("mcphub.native.neovim.files.view_image.header")
 local paths = require("mcphub.native.neovim.files.view_image.paths")
 local resize = require("mcphub.native.neovim.files.view_image.resize")
@@ -160,16 +161,34 @@ local function send_resized(target, info, encoded, res)
     attempt(long_edge > M.MAX_LONG_EDGE and M.MAX_LONG_EDGE or next_edge(long_edge, encoded), 1)
 end
 
+--- A path outside the chat's working directory needs the user's approval,
+--- whatever the auto-approve settings say: for this call, or for the file's
+--- directory for the rest of the chat. A path that does not resolve asks
+--- nothing; the handler reports it.
+---@param args table
+---@param ctx MCPHub.ConfirmationContext
+---@return MCPHub.ForcedConfirmation?
+function M.confirm_if(args, ctx)
+    local chat = ctx and ctx.chat
+    local caller = chat and { type = "codecompanion", codecompanion = { chat = chat } } or nil
+    local target = paths.resolve(args.path, caller)
+    if not target or target.inside or confirmation.scope_allowed(chat, target.real) then
+        return nil
+    end
+    return {
+        reason = ("reads %s, outside the chat's working directory %s"):format(target.real, target.cwd),
+        scope = vim.fs.dirname(target.real),
+    }
+end
+
 ---@param req ToolRequest
 ---@param res ToolResponse
 function M.handler(req, res)
+    -- A path outside the working directory only gets here once the user approved it, see `confirm_if`
     local target, err = paths.resolve(req.params.path, req.caller)
     if not target then
         ---@cast err string
         return res:error(err)
-    end
-    if not target.inside then
-        return res:error(("%s is outside the chat's working directory %s"):format(target.given, target.cwd))
     end
 
     local info, header_err = header.read(target.real)
@@ -210,6 +229,7 @@ M.definition = {
     inputSchema = M.input_schema,
     label = M.label,
     call_noun = "image",
+    confirm_if = M.confirm_if,
     handler = M.handler,
 }
 

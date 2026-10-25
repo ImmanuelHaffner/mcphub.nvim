@@ -174,6 +174,21 @@ local function expect_error(result, err, fragments)
     end
 end
 
+--- The native server refused the call before the handler ran, because it
+--- needs a confirmation the caller never obtained.
+---@param result table?
+---@param err string?
+---@param fragments string[] Each expected somewhere in the refusal
+local function expect_refused(result, err, fragments)
+    eq(result, nil)
+    local text = assert(err, "expected a refusal")
+    for _, fragment in ipairs(vim.list_extend({ "needs the user's confirmation" }, fragments)) do
+        if not text:find(fragment, 1, true) then
+            error(("expected a refusal containing %q, got %q"):format(fragment, text), 2)
+        end
+    end
+end
+
 local MEMORY_MODULE = "codecompanion.memory"
 
 T["handler"] = new_set({
@@ -248,7 +263,7 @@ T["handler"]["refuses a path outside the chat's cwd"] = function()
 
     local result, err = call({ path = path }, chat_caller(cwd))
 
-    expect_error(result, err, { path, "is outside the chat's working directory", cwd })
+    expect_refused(result, err, { path, "outside the chat's working directory", cwd })
 end
 
 T["handler"]["counts a symlink pointing outside as outside"] = function()
@@ -260,7 +275,7 @@ T["handler"]["counts a symlink pointing outside as outside"] = function()
 
     local result, err = call({ path = "link.png" }, chat_caller(cwd))
 
-    expect_error(result, err, { "is outside the chat's working directory" })
+    expect_refused(result, err, { target, "outside the chat's working directory" })
 end
 
 T["handler"]["does not take a shared prefix for containment"] = function()
@@ -271,7 +286,7 @@ T["handler"]["does not take a shared prefix for containment"] = function()
 
     local result, err = call({ path = path }, chat_caller(cwd))
 
-    expect_error(result, err, { "is outside the chat's working directory" })
+    expect_refused(result, err, { "outside the chat's working directory" })
 end
 
 --- Stub the resize backend away for the rest of the case.

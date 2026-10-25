@@ -17,6 +17,8 @@ local utils = require("mcphub.utils")
 ---@field is_auto_approved_in_server boolean Whether the tool autoApproved in the servers.json
 ---@field needs_confirmation_window boolean Whether the tool call needs a confirmation window
 ---@field forced_reason string? Why the call must be confirmed whatever the auto-approve settings say
+---@field forced_scope string? A directory the user may approve for the rest of the chat instead of the one call
+---@field chat table? The CodeCompanion chat that made the call
 
 ---@class MCPHub.ToolCallArgs
 ---@field server_name string Name of the server to call the tool on.
@@ -50,8 +52,9 @@ end
 
 ---@param params MCPHub.ToolCallArgs | MCPHub.ResourceAccessArgs
 ---@param action_name MCPHub.ActionType
+---@param ctx? MCPHub.ConfirmationContext The caller, so a tool can scope its forced confirmation to the chat
 ---@return MCPHub.ParsedParams
-function M.parse_params(params, action_name)
+function M.parse_params(params, action_name, ctx)
     params = params or {}
 
     local server_name = params.server_name
@@ -84,6 +87,11 @@ function M.parse_params(params, action_name)
         table.insert(errors, "uri is required")
     end
 
+    local forced_reason, forced_scope
+    if action_name == "use_mcp_tool" then
+        forced_reason, forced_scope = M.forced_confirmation_reason(server_name, tool_name, arguments, ctx)
+    end
+
     return {
         errors = errors,
         action = action_name or "nil",
@@ -93,9 +101,9 @@ function M.parse_params(params, action_name)
         uri = uri or "nil",
         needs_confirmation_window = M.needs_confirmation_window(server_name, tool_name),
         is_auto_approved_in_server = M.is_auto_approved_in_server(server_name, tool_name),
-        forced_reason = action_name == "use_mcp_tool"
-                and M.forced_confirmation_reason(server_name, tool_name, arguments)
-            or nil,
+        forced_reason = forced_reason,
+        forced_scope = forced_scope,
+        chat = ctx and ctx.chat,
     }
 end
 
@@ -117,14 +125,20 @@ function M.find_native_tool(server_name, tool_name)
 end
 
 --- Why the call must be confirmed whatever the auto-approve settings say, if
---- its native tool declares `confirm_if` and objects to these arguments.
+--- its native tool declares `confirm_if` and objects to these arguments, and
+--- the directory the user may approve for the chat instead.
 ---@param server_name string?
 ---@param tool_name string?
 ---@param arguments table
+---@param ctx? MCPHub.ConfirmationContext
 ---@return string? reason
-function M.forced_confirmation_reason(server_name, tool_name, arguments)
+---@return string? scope
+function M.forced_confirmation_reason(server_name, tool_name, arguments, ctx)
     local tool = M.find_native_tool(server_name, tool_name)
-    return tool and confirmation.reason(tool, arguments) or nil
+    if not tool then
+        return nil
+    end
+    return confirmation.reason(tool, arguments, ctx)
 end
 
 ---@class MCPHub.DeclineContext
@@ -134,6 +148,8 @@ end
 ---@field timeout? any The call's `timeout_param` argument, nil when absent
 ---@field soft_limit? number The tool's `timeout_soft_limit()`
 ---@field text? string Free text from an `input` reason
+---@field scope? string The directory the call's tool offers to approve for the chat
+---@field chat? table The CodeCompanion chat that made the call
 
 ---@class MCPHub.DeclineReason
 ---@field id string
@@ -144,6 +160,7 @@ end
 ---@field message? fun(ctx: MCPHub.DeclineContext): string What the LLM is told when the reason declines
 ---@field approves? boolean The reason approves the call, with `arguments(ctx)` instead of the call's
 ---@field arguments? fun(ctx: MCPHub.DeclineContext): table
+---@field on_approve? fun(ctx: MCPHub.DeclineContext) Run when the reason approves, before the call
 
 ---@param v any
 ---@return string
@@ -247,6 +264,22 @@ M.DECLINE_REASONS = {
         end,
     },
     {
+        id = "allow_scope",
+        key = "f",
+        label = function(ctx)
+            return ("Allow %s for this chat"):format(vim.fn.fnamemodify(ctx.scope, ":~"))
+        end,
+        requires = "scope_offered",
+        approves = true,
+        arguments = function(ctx)
+            return ctx.arguments
+        end,
+        on_approve = function(ctx)
+            confirmation.allow_scope(ctx.chat, ctx.scope)
+            confirmation.grant(ctx.arguments)
+        end,
+    },
+    {
         id = "other",
         key = "o",
         label = "Other…",
@@ -267,6 +300,10 @@ local CONDITIONS = {
     over_soft_limit = function(ctx)
         local t = ctx.timeout
         return type(t) == "number" and ctx.soft_limit ~= nil and (t == 0 or t > ctx.soft_limit)
+    end,
+    -- Without a chat there is nowhere to remember the directory
+    scope_offered = function(ctx)
+        return ctx.scope ~= nil and ctx.chat ~= nil
     end,
 }
 
@@ -292,6 +329,8 @@ local function decline_context(parsed_params)
         arguments = arguments,
         timeout = timeout ~= vim.NIL and timeout or nil,
         soft_limit = tool.timeout_soft_limit and tool.timeout_soft_limit(),
+        scope = parsed_params.forced_scope,
+        chat = parsed_params.chat,
     }
 end
 
@@ -586,7 +625,11 @@ function M.handle_auto_approval_decision(parsed_params)
         if choice then
             local reason = find_reason(choice.id)
             if reason and reason.approves then
-                return { approve = true, arguments = reason.arguments(decline_context(parsed_params)) }
+                local ctx = decline_context(parsed_params)
+                if reason.on_approve then
+                    reason.on_approve(ctx)
+                end
+                return { approve = true, arguments = reason.arguments(ctx) }
             end
             return { error = M.decline_message(choice, parsed_params), approve = false }
         end

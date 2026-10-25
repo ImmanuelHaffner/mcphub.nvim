@@ -319,7 +319,12 @@ function NativeServer:call_tool(name, arguments, opts)
         log.warn(string.format("Tool '%s' not found", name))
         return output_handler(nil, err)
     end
-    local forced_reason = confirmation.reason(tool, arguments)
+    -- The chat that made the call, so a path inside a directory approved for it needs no grant
+    local caller_chat = type(opts.caller) == "table"
+            and type(opts.caller.codecompanion) == "table"
+            and opts.caller.codecompanion.chat
+        or nil
+    local forced_reason = confirmation.reason(tool, arguments, { chat = caller_chat })
     if forced_reason and not confirmation.consume(arguments) then
         local err = string.format(
             "Tool '%s' was refused: it needs the user's confirmation (%s), which this caller did not obtain",

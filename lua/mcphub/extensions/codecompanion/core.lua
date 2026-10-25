@@ -16,8 +16,8 @@ function M.execute_mcp_tool(params, tools, output_handler, context)
     context = context or {}
     ---@diagnostic disable-next-line: missing-parameter
     async.run(function()
-        -- Reuse existing validation logic
-        local parsed_params = shared.parse_params(params, context.action)
+        -- Reuse existing validation logic; the chat lets a tool scope a forced confirmation to it
+        local parsed_params = shared.parse_params(params, context.action, { chat = tools and tools.chat })
         if #parsed_params.errors > 0 then
             return output_handler({
                 status = "error",

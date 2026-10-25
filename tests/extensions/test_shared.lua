@@ -219,8 +219,8 @@ T["decline reasons"]["Wrong cwd only for tools that declare cwd_param"] = functi
     labels = offered(parse({ command = "ls", cwd = "/tmp" }))
     eq(labels.cwd, nil)
     eq(labels.wrong, "Wrong call")
-    -- Neither timeout reason is offered without a `timeout` argument.
-    eq(vim.tbl_count(labels), #shared.DECLINE_REASONS - 3)
+    -- Neither timeout reason is offered without a `timeout` argument, nor the chat scope without a scope.
+    eq(vim.tbl_count(labels), #shared.DECLINE_REASONS - 4)
 end
 
 T["decline reasons"]["Timeout too high only when the call passes a timeout"] = function()
