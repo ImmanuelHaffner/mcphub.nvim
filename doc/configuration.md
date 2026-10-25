@@ -389,11 +389,16 @@ Default:
     builtin_tools = {
         edit_file = {
         },
+        view_image = {
+            enabled = false,
+        },
     },
 }
 ```
 
 Configuration options for MCPHub's builtin tools like `edit_file` tool. View complete [Builtin Tools Documentation](/mcp/builtin/neovim) for all available tools and their configuration options.
+
+`view_image.enabled` registers the `view_image` tool, which shows the model an image file, in the `neovim` server. It is read once, when the hub starts, so changing it needs a restart.
 
 ### ui
 

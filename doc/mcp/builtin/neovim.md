@@ -159,7 +159,31 @@ Execute Lua code directly in Neovim using `nvim_exec2`.
 - Error handling with stack traces
 - Support for complex data structures
 
-## Resources
+### `view_image`
+Show the model an image file, so it can look at it. Off by default; enable it with `builtin_tools.view_image.enabled = true`, which is read when the hub starts.
+
+**Parameters:**
+- `path` (string, required): Path of the image, absolute or relative to the calling chat's working directory
+
+**Formats and limits:**
+- PNG, JPEG, GIF and WebP. The type and dimensions are read from the file's header, never from its extension, because providers reject an image whose declared type does not match its bytes.
+- An image over 2576 px on its long edge, or over 5,000,000 bytes as base64, is downscaled on the client to fit both: Anthropic's high-resolution long edge, and its per-image payload limit. Larger images would be scaled down by the provider anyway, at full upload cost.
+- Resizing uses `sips` on macOS, otherwise ImageMagick (`magick` or `convert`), and runs asynchronously. The format is kept, except that WebP becomes PNG; JPEG is re-encoded at quality 90 and a GIF keeps its first frame. Without a backend an oversized image is refused.
+
+**Result:**
+One text block and one image block. The text names what was sent, for example:
+
+```text
+Image `shots/home.png`: image/png, 5120×2160, sent as image/png 2576×1087 (scale 0.503, 1834568 bytes base64).
+```
+
+With CodeCompanion, adapters that declare `opts.tool_result_images` (Anthropic, and adapters extending it) receive the image nested in the tool's result; others receive it as a separate user message after the result.
+
+**Approval:**
+- Inside the calling chat's working directory, as CodeCompanion's memory tool sees it, `view_image` follows the usual auto-approval settings, so `autoApprove` lets it run silently. Symlinks are followed before the check.
+- Outside it, the call always asks, whatever `autoApprove` or `auto_approve` say and in yolo mode too. The approval window then also offers *Allow `<dir>` for this chat* (key `f`), which approves the file's directory, and everything below it, for the rest of that chat only.
+- A caller that skips the approval window is refused by the native server, so the check cannot be bypassed.
+
 
 #### Buffer Information (`neovim://buffer`)
 Comprehensive information about the currently active buffer.
