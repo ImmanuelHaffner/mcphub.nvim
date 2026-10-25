@@ -136,14 +136,19 @@ local function add_tool_output(
     local formatted_name = opts.format_tool and opts.format_tool(display_name, tool) or display_name
 
     if has_function_calling then
-        chat:add_tool_output(
-            tool,
-            text,
-            (user_msg or show_result_in_chat or is_error) and (user_msg or text)
-                or string.format("**`%s` Tool**: Successfully finished", formatted_name)
-        )
-        for _, image in ipairs(images) do
-            chat:add_image_message(image)
+        local user_text = (user_msg or show_result_in_chat or is_error) and (user_msg or text)
+            or string.format("**`%s` Tool**: Successfully finished", formatted_name)
+        -- An adapter that declares `tool_result_images` takes the images inside the tool's result.
+        -- Checking the capability keeps a CodeCompanion without it safe: it would ignore the fourth
+        -- argument and lose the images, but it never declares the capability either.
+        local adapter_opts = type(chat.adapter) == "table" and chat.adapter.opts or {}
+        if #images > 0 and adapter_opts.tool_result_images and adapter_opts.vision then
+            chat:add_tool_output(tool, text, user_text, { images = images })
+        else
+            chat:add_tool_output(tool, text, user_text)
+            for _, image in ipairs(images) do
+                chat:add_image_message(image)
+            end
         end
     else
         if show_result_in_chat or is_error then
@@ -240,15 +245,22 @@ function M.create_output_handlers(display_name, has_function_calling, opts, iden
             end
 
             if result.images and #result.images > 0 then
+                local image_header = require("mcphub.native.neovim.files.view_image.header")
                 for _, image in ipairs(result.images) do
                     local cached_file_path = image_cache.save_image(image.data, image.mimeType)
                     local id = cached_file_path
-                    table.insert(images, {
+                    local entry = {
                         id = id,
                         base64 = image.data,
                         mimetype = image.mimeType,
                         cached_file_path = cached_file_path,
-                    })
+                    }
+                    -- With its size known, CodeCompanion counts the image exactly rather than at its ceiling
+                    local info = cached_file_path and image_header.read(cached_file_path)
+                    if info then
+                        entry.dimensions = { width = info.width, height = info.height }
+                    end
+                    table.insert(images, entry)
                 end
 
                 if not to_llm then
