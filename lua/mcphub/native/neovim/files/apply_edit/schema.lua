@@ -101,6 +101,7 @@ M.ERROR_REASONS = {
 M.WARNING_REASONS = {
     unused_content_label = "unused_content_label",
     indent_detect_fallback = "indent_detect_fallback", -- "detect" treated as "match_anchor" for now
+    stringified_field = "stringified_field", -- `ops` / `contents` arrived as a JSON-encoded string; decoded and used
     content_encoding_lossy = "content_encoding_lossy", -- response echoed ill-formed UTF-8; bytes replaced with U+FFFD
 }
 
@@ -1122,6 +1123,38 @@ local function validate_contents(contents, errors)
     return parsed
 end
 
+--- Decode `ops` or `contents` sent as a string holding their JSON encoding,
+--- an occasional client or model glitch. The meaning is unambiguous, so
+--- refusing it would only cost a round trip; a string that does not decode to
+--- the field's shape is left for the type check to refuse.
+---
+--- @param v          any
+--- @param want_array boolean  `true` for `ops`, `false` for the `contents` object.
+--- @return table? decoded
+local function decode_stringified(v, want_array)
+    if type(v) ~= "string" then
+        return nil
+    end
+    local ok, decoded = pcall(vim.json.decode, v, { luanil = { object = true, array = true } })
+    if not ok or type(decoded) ~= "table" then
+        return nil
+    end
+    -- `[]` and `{}` both decode to `{}`; the field's own checks judge an empty one.
+    if next(decoded) ~= nil and vim.islist(decoded) ~= want_array then
+        return nil
+    end
+    return decoded
+end
+
+local function stringified_warning(field, shape)
+    return {
+        path = field,
+        reason = M.WARNING_REASONS.stringified_field,
+        message = string.format("`%s` arrived as a string holding JSON; it was decoded and used", field),
+        hint = string.format("send `%s` as a JSON %s, not as a string", field, shape),
+    }
+end
+
 --------------------------------------------------------------------------------
 -- Top-level entry point
 --------------------------------------------------------------------------------
@@ -1171,7 +1204,14 @@ function M.validate(input, opts)
         return false, errors
     end
 
-    if input.ops == nil then
+    local ops = input.ops
+    local decoded_ops = decode_stringified(ops, true)
+    if decoded_ops then
+        ops = decoded_ops
+        table.insert(warnings, stringified_warning("ops", "array"))
+    end
+
+    if ops == nil then
         table.insert(
             errors,
             err("ops", M.ERROR_REASONS.missing_field, "`ops` is required", {
@@ -1181,18 +1221,18 @@ function M.validate(input, opts)
         )
         return false, errors
     end
-    if type(input.ops) ~= "table" then
+    if type(ops) ~= "table" then
         table.insert(
             errors,
             err("ops", M.ERROR_REASONS.wrong_type, "`ops` must be an array", {
                 expected = "array",
-                got = json_type_of(input.ops),
+                got = json_type_of(ops),
                 hint = "`ops` is a JSON array of op objects, even when there is only one op",
             })
         )
         return false, errors
     end
-    if #input.ops == 0 then
+    if #ops == 0 then
         table.insert(
             errors,
             err("ops", M.ERROR_REASONS.out_of_range, "`ops` must contain at least one op", {
@@ -1204,8 +1244,14 @@ function M.validate(input, opts)
         return false, errors
     end
 
+    local raw_contents = input.contents
+    local decoded_contents = decode_stringified(raw_contents, false)
+    if decoded_contents then
+        raw_contents = decoded_contents
+        table.insert(warnings, stringified_warning("contents", "object"))
+    end
     -- Validate `contents` before ops so content_ref resolution sees the map.
-    local contents = validate_contents(input.contents, errors)
+    local contents = validate_contents(raw_contents, errors)
     if not contents then
         return false, errors
     end
@@ -1226,7 +1272,7 @@ function M.validate(input, opts)
     -- ...) — that translation happens inside `validate_op`.
     local used_labels = {}
     local parsed_ops = {}
-    for i, op in ipairs(input.ops) do
+    for i, op in ipairs(ops) do
         local parsed = validate_op(op, i, contents, used_labels, errors, warnings, require_fingerprint)
         if parsed then
             table.insert(parsed_ops, parsed)

@@ -65,6 +65,26 @@ describe("mcphub.native.neovim.files.apply_edit.schema", function()
             assert_error(errors, "ops", schema.ERROR_REASONS.out_of_range)
         end)
 
+        it("decodes an `ops` array sent as a JSON string, with a warning", function()
+            local ok, parsed = helpers.validate({
+                ops = vim.json.encode({
+                    { kind = "delete_range", path = "f", anchor = { by = "line_range", start = 1, ["end"] = 1 } },
+                }),
+            })
+            assert.is_true(ok)
+            assert.is.equal(1, #parsed.ops)
+            assert.is.equal("delete_range", parsed.ops[1].kind)
+            assert.is.equal(1, #parsed.warnings)
+            assert.is.equal("ops", parsed.warnings[1].path)
+            assert.is.equal(schema.WARNING_REASONS.stringified_field, parsed.warnings[1].reason)
+        end)
+
+        it("rejects an `ops` string holding a JSON object", function()
+            local ok, errors = helpers.validate({ ops = '{"kind":"delete_range"}' })
+            assert.is_false(ok)
+            assert_error(errors, "ops", schema.ERROR_REASONS.wrong_type)
+        end)
+
         it("rejects a non-boolean `dry_run`", function()
             local ok, errors = helpers.validate({
                 ops = { { kind = "delete_range", path = "f", anchor = { by = "line_range", start = 1, ["end"] = 1 } } },
@@ -102,6 +122,35 @@ describe("mcphub.native.neovim.files.apply_edit.schema", function()
             })
             assert.is_false(ok)
             assert.is_not_nil(find_error(errors, 'contents["good"]', schema.ERROR_REASONS.wrong_type))
+        end)
+
+        it("decodes a `contents` object sent as a JSON string, with a warning", function()
+            local ok, parsed = helpers.validate({
+                ops = {
+                    {
+                        kind = "replace_range",
+                        path = "f",
+                        anchor = { by = "line_range", start = 1, ["end"] = 1 },
+                        content_ref = "helper",
+                        indent = "match_anchor",
+                    },
+                },
+                contents = '{"helper":"x"}',
+            })
+            assert.is_true(ok)
+            assert.is.equal("x", parsed.contents.helper)
+            assert.is.equal(1, #parsed.warnings)
+            assert.is.equal("contents", parsed.warnings[1].path)
+            assert.is.equal(schema.WARNING_REASONS.stringified_field, parsed.warnings[1].reason)
+        end)
+
+        it("rejects a `contents` string holding a JSON array", function()
+            local ok, errors = helpers.validate({
+                ops = { { kind = "delete_range", path = "f", anchor = { by = "line_range", start = 1, ["end"] = 1 } } },
+                contents = '["x"]',
+            })
+            assert.is_false(ok)
+            assert_error(errors, "contents", schema.ERROR_REASONS.wrong_type)
         end)
     end)
 

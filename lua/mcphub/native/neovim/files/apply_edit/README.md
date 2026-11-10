@@ -510,7 +510,7 @@ Each `Diagnostic`:
 
 ### `warnings[]`
 
-Non-fatal issues — unused `contents` labels, `indent: detect` fallbacks, etc. The batch still applies; warnings are informational.
+Non-fatal issues — unused `contents` labels, `indent: detect` fallbacks, `ops` or `contents` sent as a string holding their JSON (decoded and used, reason `stringified_field`), etc. The batch still applies; warnings are informational.
 
 ## Errors and recovery
 
