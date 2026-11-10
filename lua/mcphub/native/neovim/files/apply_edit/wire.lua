@@ -65,9 +65,10 @@ local HANDLED = {
     conflict_op_index = true,
     conflict_range = true,
     conflicting_op_indices = true,
+    preview = true,
 }
 
---- Flatten one `applied[]` / `rejected[]` / `failed[]` / `warnings[]` entry.
+--- Flatten one `applied[]` / `rejected[]` / `failed[]` / `planned[]` / `warnings[]` entry.
 --- @param e table
 --- @return table
 function M.entry(e)
@@ -92,6 +93,19 @@ function M.entry(e)
     out.conflict_lines = M.lines(e.conflict_range)
     if type(e.conflicting_op_indices) == "table" and #e.conflicting_op_indices > 0 then
         out.conflict_ops = vim.tbl_map(zero_based, e.conflicting_op_indices)
+    end
+    if type(e.preview) == "table" and #e.preview > 0 then
+        -- Numbered like a read; `...` marks the skipped middle of a long range.
+        local fmt = "%" .. #tostring(e.preview[#e.preview].line) .. "d\t%s"
+        local rows, prev = {}, nil
+        for _, p in ipairs(e.preview) do
+            if prev and p.line > prev + 1 then
+                rows[#rows + 1] = "..."
+            end
+            rows[#rows + 1] = string.format(fmt, p.line, p.text)
+            prev = p.line
+        end
+        out.preview = table.concat(rows, "\n")
     end
     for k, v in pairs(e) do
         if not HANDLED[k] and v ~= vim.NIL then
@@ -165,6 +179,7 @@ function M.format(response)
         status = response.status,
         summary = response.summary,
         note = response.note,
+        planned = entries(response.planned),
         applied = entries(response.applied),
         rejected = entries(response.rejected),
         failed = entries(response.failed),

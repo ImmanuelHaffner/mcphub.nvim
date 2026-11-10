@@ -16,6 +16,30 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
         end)
     end)
 
+    describe("planned", function()
+        it("numbers a dry run's preview and marks a skipped middle", function()
+            local out = wire.format({
+                status = "dry_run",
+                planned = {
+                    {
+                        op_index = 1,
+                        path = HOME_FILE,
+                        kind = "delete_range",
+                        range = { start_line = 9, end_line = 12 },
+                        preview = { { line = 9, text = "a" }, { line = 12, text = "b" } },
+                    },
+                },
+            })
+            assert.are.same({
+                op = 0,
+                file = "~/proj/a.lua",
+                kind = "delete_range",
+                lines = "9-12",
+                preview = " 9\ta\n...\n12\tb",
+            }, out.planned[1])
+        end)
+    end)
+
     describe("format", function()
         it("drops empty lists and files that add nothing", function()
             local out = wire.format({

@@ -56,6 +56,72 @@ local function planner_failures_to_failed(failures)
     return failed
 end
 
+--- Text of line `n` of `rec`, without its newline.
+local function line_at(rec, n)
+    local to = (rec.offsets[n + 1] or #rec.content + 1) - 1
+    return (rec.content:sub(rec.offsets[n], to):gsub("\n$", ""))
+end
+
+--- The lines that show where a range sits, which is where an off-by-one
+--- shows: all of a short range, the first and last line of a long one, and
+--- the two neighbours of an insertion seam.
+---
+--- @param rec   mcphub.edit.FileRecord
+--- @param range mcphub.edit.ResolvedRange
+--- @return { line: integer, text: string }[]
+local function boundary_lines(rec, range)
+    local s, e = range.start_line, range.end_line
+    local picks = {}
+    if e < s then
+        picks = { s - 1, s }
+    elseif e - s <= 2 then
+        for n = s, e do
+            picks[#picks + 1] = n
+        end
+    else
+        picks = { s, e }
+    end
+    local out = {}
+    for _, n in ipairs(picks) do
+        if n >= 1 and n <= rec.n_lines then
+            out[#out + 1] = { line = n, text = line_at(rec, n) }
+        end
+    end
+    return out
+end
+
+--- The response to a `dry_run` whose plan resolved: where every op would
+--- land, and nothing applied.
+---
+--- @param plan mcphub.edit.Plan
+--- @return table
+local function dry_run_response(plan)
+    local planned = {}
+    for _, lop in ipairs(plan.located_ops) do
+        for _, range in ipairs(lop.range and { lop.range } or lop.ranges) do
+            planned[#planned + 1] = {
+                op_index = lop.op_index,
+                path = lop.path,
+                kind = lop.kind,
+                range = { start_line = range.start_line, end_line = range.end_line },
+                preview = boundary_lines(plan.records[lop.path], range),
+            }
+        end
+    end
+    return {
+        status = "dry_run",
+        summary = string.format("dry run: %d op(s) resolved", #plan.located_ops),
+        note = "Nothing was applied, so every file is exactly as you read it: resubmit without "
+            .. "`dry_run` and with the same baseline_fingerprint to apply.",
+        planned = planned,
+        applied = {},
+        rejected = {},
+        failed = {},
+        files = {},
+        warnings = plan.warnings or {},
+    }
+end
+
 --- Apply a batch of edit operations.
 ---
 --- ## LLM-facing seal (architectural invariant)
@@ -129,6 +195,12 @@ function M.apply(input, drive_file, on_complete)
             files = {},
             warnings = plan_fail.warnings or {},
         })
+    end
+
+    -- A dry run stops here: the plan resolved, so report where each op would
+    -- land without touching a buffer or opening a review.
+    if parsed.dry_run then
+        return on_complete(dry_run_response(plan))
     end
 
     -- Phase 3: apply. Async; the response is delivered via on_complete

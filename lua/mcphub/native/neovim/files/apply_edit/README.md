@@ -427,8 +427,10 @@ What the LLM receives is the engine's response flattened by `wire.lua` at the MC
 
 ```
 {
-  status:   "applied" | "partial" | "failed" | "cancelled",
+  status:   "applied" | "partial" | "failed" | "cancelled" | "dry_run",
   summary:  string,
+  note:     string?,
+  planned:  [ Entry, ... ]?,   // dry runs only
   applied:  [ Entry, ... ]?,
   rejected: [ Entry, ... ]?,
   failed:   [ Entry, ... ]?,
@@ -446,6 +448,11 @@ A failure that applied nothing (schema or planning) adds a `note` saying so: eve
 | `"partial"`  | Some ops applied, some rejected or failed.                         |
 | `"failed"`   | No ops applied; one or more failed.                                |
 | `"cancelled"`| User cancelled the review session and no ops landed.               |
+| `"dry_run"`  | `dry_run: true` and every op resolved; nothing was applied.        |
+
+A dry run that resolves returns `planned[]` instead of applying: one entry per op (per range, for `occurrence: "all"`) with its `lines` and a numbered `preview` of the lines that frame it — all of a range of up to three lines, the first and last line of a longer one, the two neighbours of an insertion seam — because that is where an off-by-one shows.
+A dry run that does not resolve fails exactly like a real call.
+Conflicts the EditUI driver detects after widening adjacent edits are not visible to a dry run and still surface at apply time.
 
 ### Entries
 

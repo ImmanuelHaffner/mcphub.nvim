@@ -287,7 +287,10 @@ local apply_edit_input_schema = {
             propertyNames = { pattern = "^[a-zA-Z_][a-zA-Z0-9_]*$" },
             additionalProperties = { type = "string" },
         },
-        dry_run = { description = "Optional. If true, resolve and report without applying any edit.", type = "boolean" },
+        dry_run = {
+            description = "Optional. If true, resolve every op and report where it would land in `planned[]` without applying anything or opening a review.",
+            type = "boolean",
+        },
     },
     required = { "ops" },
     additionalProperties = false,
@@ -304,6 +307,7 @@ Failures are plan-atomic: if any op fails to resolve, no buffer is touched and t
 Files are reviewed one after another, and each is re-checked just before its review: a file that changed since planning (edited by the user, or changed on disk) is refused on its own, its ops listed in `failed[]` as `stale_fingerprint`, while the other files still apply and the status is `partial`. Re-read that file and replan only its ops.
 Every `applied[]` / `rejected[]` / `failed[]` entry names its op as `op`, the 0-based index into your `ops` array, and its location as `lines` (`"12"`, `"12-14"`, or `"before 12"` for an insertion), numbered in the file as you read it. An `anchor_ambiguous` failure lists `candidates` with each match's line text, so you can pick one with `occurrence: { nth }` without re-reading. Empty lists are omitted.
 `files[]` gives each file's `fingerprint` after the call; use it as the next `baseline_fingerprint` without re-reading. A file still exactly as you read it (every op on it failed or was rejected) keeps its fingerprint. A changed file also lists `changes` (`{ was, now }`: each changed region's lines in the file as you read it and as it is now; line numbers below a change shift accordingly) and `excerpts`, the changed regions as they are now, numbered like a read, with 2 lines of context. A file without a `fingerprint` changed too much to show; re-read it before editing it again. A failure where nothing was applied says so in `note`.
+With `dry_run: true` a batch that resolves is not applied: `planned[]` lists each op's `lines` and a numbered `preview` of the lines that frame it (all of a short range, the first and last line of a long one, the two neighbours of an insertion), so you can check placement and then resubmit without `dry_run`, with the same fingerprints. Conflicts that only arise when the review UI merges adjacent edits are still caught at apply time.
 
 Each op has a `kind`, a `path`, a `baseline_fingerprint` (from `neovim__read_with_fingerprint`; a mismatch means the file changed under you and the op is refused), and an `anchor`.
 

@@ -528,3 +528,33 @@ describe("mcphub.native.neovim.files.apply_edit.engine.apply read-back", functio
         cleanup_fixture(path, bufnr)
     end)
 end)
+
+describe("mcphub.native.neovim.files.apply_edit.engine.apply dry_run", function()
+    local function never(_, _)
+        error("a dry run must not reach the driver")
+    end
+
+    it("reports where each op lands, framed by its boundary lines, and applies nothing", function()
+        local lines = { "one", "two", "three", "four", "five", "six" }
+        local path, bufnr, fp = fixture_file(lines)
+        local function op(kind, anchor)
+            return { kind = kind, path = path, baseline_fingerprint = fp, anchor = anchor }
+        end
+        local insert = op("insert", { by = "after", of = { by = "line_range", start = 1, ["end"] = 1 } })
+        insert.content, insert.indent = "x", "preserve"
+        local response = await_apply_with({
+            dry_run = true,
+            ops = {
+                insert,
+                op("delete_range", { by = "line_range", start = 3, ["end"] = 6 }),
+            },
+        }, never)
+        assert.is.equal("dry_run", response.status)
+        assert.is_truthy(response.note:find("Nothing was applied", 1, true))
+        assert.are.same({ start_line = 2, end_line = 1 }, response.planned[1].range)
+        assert.are.same({ { line = 1, text = "one" }, { line = 2, text = "two" } }, response.planned[1].preview)
+        assert.are.same({ { line = 3, text = "three" }, { line = 6, text = "six" } }, response.planned[2].preview)
+        assert.are.same(lines, vim.fn.readfile(path))
+        cleanup_fixture(path, bufnr)
+    end)
+end)
