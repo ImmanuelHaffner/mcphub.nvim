@@ -12,7 +12,7 @@
 ---     1 internally, and emitting both conventions side by side invited
 ---     off-by-one corrections.
 ---   * `path` meant a file in planner failures and a JSON path in schema
----     failures; they become `file` and `field`.
+---     failures and warnings; they become `file` and `field`.
 ---   * Ranges become a `lines` string, because an insertion position is the
 ---     zero-width range `{ N, N-1 }`, which reads like an inverted range.
 ---   * The echoed `anchor` and `baseline_fingerprint` are dropped: the model
@@ -122,6 +122,19 @@ local function entries(list)
     return vim.tbl_map(M.entry, list)
 end
 
+-- Every warning that has a `path` comes from schema validation, so it names a
+-- field of the request, never a file.
+local function warning_entries(list)
+    if type(list) ~= "table" or #list == 0 then
+        return nil
+    end
+    return vim.tbl_map(function(w)
+        local out = M.entry(w)
+        out.file, out.field = nil, w.path
+        return out
+    end, list)
+end
+
 --- A per-file entry, or nil when it would say nothing `applied[]` does not.
 --- @param f table
 --- @return table?
@@ -183,7 +196,7 @@ function M.format(response)
         applied = entries(response.applied),
         rejected = entries(response.rejected),
         failed = entries(response.failed),
-        warnings = entries(response.warnings),
+        warnings = warning_entries(response.warnings),
     }
     local files = {}
     for _, f in ipairs(response.files or {}) do

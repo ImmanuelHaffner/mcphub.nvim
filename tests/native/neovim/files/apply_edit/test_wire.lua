@@ -184,6 +184,22 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
             assert.are.same({ reason = "wrong_type", field = "ops" }, out.failed[1])
         end)
 
+        it("names a warning's request field as `field`, not as a file", function()
+            local out = wire.format({
+                status = "applied",
+                warnings = {
+                    { path = "ops", reason = "stringified_field", message = "m" },
+                    { path = "ops[1].indent", op_index = 2, reason = "indent_detect_fallback", message = "m" },
+                    { reason = "content_encoding_lossy", message = "m" },
+                },
+            })
+            assert.are.same({
+                { field = "ops", reason = "stringified_field", message = "m" },
+                { op = 1, field = "ops[1].indent", reason = "indent_detect_fallback", message = "m" },
+                { reason = "content_encoding_lossy", message = "m" },
+            }, out.warnings)
+        end)
+
         it("renumbers conflict peers from 0 and drops the stale baseline", function()
             local out = wire.format({
                 status = "failed",
