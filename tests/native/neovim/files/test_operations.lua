@@ -102,6 +102,16 @@ local function open(path)
     return buf
 end
 
+---The name Neovim gives a buffer for `path`, which exists: it resolves symlinks.
+---`root` itself is deliberately left unresolved, so that on macOS, where
+---`$TMPDIR` sits under the `/var` -> `/private/var` symlink, every spec also
+---exercises a path that differs from the buffer names it must match.
+---@param path string
+---@return string
+local function bufname_for(path)
+    return assert(vim.uv.fs_realpath(path), "no such path: " .. path)
+end
+
 ---A directory on a filesystem other than the one holding `root`, if any exists.
 ---Without one, the EXDEV fallback cannot be exercised at all.
 ---@return string?
@@ -235,7 +245,7 @@ T["move_item"]["buffers"]["re-points an unmodified buffer and keeps its contents
     local dst = root .. "/renamed/clean.txt"
     local result = call("move_item", { path = path, new_path = dst })
     eq(failed(result), false)
-    eq(vim.api.nvim_buf_get_name(buf), dst)
+    eq(vim.api.nvim_buf_get_name(buf), bufname_for(dst))
     -- Reloading a buffer whose file is missing empties it, which is how an earlier
     -- version of this tool destroyed a note. The contents must survive the move.
     eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { "clean", "second line" })
@@ -251,7 +261,7 @@ T["move_item"]["buffers"]["keeps unsaved changes in a modified buffer"] = functi
     local dst = root .. "/renamed/dirty.txt"
     local result = call("move_item", { path = path, new_path = dst })
     eq(failed(result), false)
-    eq(vim.api.nvim_buf_get_name(buf), dst)
+    eq(vim.api.nvim_buf_get_name(buf), bufname_for(dst))
     -- Deliberately not reloaded: `edit!` would discard the unwritten line.
     eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { "on disk", "unsaved" })
     eq(vim.bo[buf].modified, true)
@@ -265,7 +275,7 @@ T["move_item"]["buffers"]["follows a buffer beneath a moved directory"] = functi
     local buf = open(path)
     local result = call("move_item", { path = root .. "/tree", new_path = root .. "/moved/tree" })
     eq(failed(result), false)
-    eq(vim.api.nvim_buf_get_name(buf), root .. "/moved/tree/nested/deep.txt")
+    eq(vim.api.nvim_buf_get_name(buf), bufname_for(root .. "/moved/tree/nested/deep.txt"))
     eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { "deep" })
 end
 
@@ -278,7 +288,7 @@ T["move_item"]["buffers"]["does not mistake a shared prefix for containment"] = 
     fixture(root .. "/dir/inner.txt", { "inner" })
     local result = call("move_item", { path = root .. "/dir", new_path = root .. "/moved" })
     eq(failed(result), false)
-    eq(vim.api.nvim_buf_get_name(sibling_buf), sibling)
+    eq(vim.api.nvim_buf_get_name(sibling_buf), bufname_for(sibling))
 end
 
 T["delete_items"] = new_set()
