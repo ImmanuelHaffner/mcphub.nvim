@@ -301,7 +301,7 @@ local apply_edit_input_schema = {
 --------------------------------------------------------------------------------
 
 local apply_edit_description = [[
-Apply a batch of structured edits to existing files. Use this for editing *inside* existing files; for file create / delete / rename use `neovim__write_file`, `neovim__delete_items`, `neovim__move_item`.
+Apply a batch of structured edits to existing files. To create, delete or rename files use `neovim__write_file`, `neovim__delete_items`, `neovim__move_item`.
 
 Failures are plan-atomic: if any op fails to resolve, no buffer is touched and the response lists every problem with candidates and a hint — no fuzzy guessing, no silent wrong-location edits. Otherwise the user reviews each hunk and accepts or rejects it; per-op outcomes come back in `applied[]` / `rejected[]`.
 Files are reviewed one after another, and each is re-checked just before its review: a file that changed since planning (edited by the user, or changed on disk) is refused on its own, its ops listed in `failed[]` as `stale_fingerprint`, while the other files still apply and the status is `partial`. Re-read that file and replan only its ops.
@@ -309,77 +309,36 @@ Every `applied[]` / `rejected[]` / `failed[]` entry names its op as `op`, the 0-
 `files[]` gives each file's `fingerprint` after the call; use it as the next `baseline_fingerprint` without re-reading. A file still exactly as you read it (every op on it failed or was rejected) keeps its fingerprint. A changed file also lists `changes` (`{ was, now }`: each changed region's lines in the file as you read it and as it is now; line numbers below a change shift accordingly) and `excerpts`, the changed regions as they are now, numbered like a read, with 2 lines of context. A file without a `fingerprint` changed too much to show; re-read it before editing it again. A failure where nothing was applied says so in `note`.
 With `dry_run: true` a batch that resolves is not applied: `planned[]` lists each op's `lines` and a numbered `preview` of the lines that frame it (all of a short range, the first and last line of a long one, the two neighbours of an insertion), so you can check placement and then resubmit without `dry_run`, with the same fingerprints.
 
-Each op has a `kind`, a `path`, a `baseline_fingerprint` (from `neovim__read_with_fingerprint`; a mismatch means the file changed under you and the op is refused), and an `anchor`.
+Each op has a `kind` (`replace_range`, `insert`, `delete_range`), a `path`, a `baseline_fingerprint` (from `neovim__read_with_fingerprint` or a previous call's `files[]`; a mismatch refuses the op), and an `anchor`. Edits are line-granular: every anchor resolves to whole lines.
 
-ANCHORS locate by `line_range` (1-based inclusive `start`/`end`) or `unique_text` (a verbatim substring, which may span several lines, that must match exactly once unless `occurrence` selects `{nth}` or `all`). A base anchor resolves to a span of whole line(s) `[S..E]`.
+ANCHORS. `line_range` names 1-based inclusive `start`/`end`. `unique_text` names a verbatim substring, possibly spanning lines, that must match exactly once unless `occurrence` picks `{ nth }` or `all` (`all` on `delete_range` only). It selects every line it touches, so `replace_range` content must be the complete new line(s), unchanged parts included. A trailing `\n` in `text` pins the match to the end of a line; a leading one is refused.
+For `replace_range` and `delete_range` the anchor IS the extent: exactly the lines it resolves to, never the surrounding block.
+`insert` needs a positional anchor. `{ by: before | after, of: <base anchor> }` inserts just above the base anchor's first line or just below its last. `{ by: between, before_text, after_text }` inserts at the join of two texts on consecutive lines, matched together, so their concatenation must be unique but neither half need be; use it when the context that makes the spot unique lies on both sides of it. Neither text carries the `\n` at the join.
 
-The anchor plays one of two roles, depending on the op:
+CONTENT is `content` inline or `content_ref` naming an entry of `contents`; `delete_range` takes none. A newline separates lines, so a leading or trailing `\n` in content adds a blank line at that edge: use one on purpose (a blank line after a new function), never by accident.
 
-  * For `replace_range` and `delete_range` the anchor IS the edit extent. The op acts on exactly the line(s) `[S..E]` it resolves to and never expands to the surrounding block: anchoring on the first line of a paragraph, function, or list edits only that one line. To act on a whole block the anchor must cover all of its lines (a `line_range` spanning them, or a `unique_text` matching the entire block).
-  * For `insert` the anchor must be wrapped in a positional MODIFIER that turns the span into an insertion position; the span's own line(s) are left unchanged and `content` is placed at that position.
+INDENT is required for `replace_range` and `insert`. `match_anchor` prefixes every content line with the indentation of the anchor's first line, so write content at column 0 with its relative indentation. `preserve` inserts content byte for byte, so write the full indentation yourself; it is also the choice for a replaced region of mixed indentation. Indenting content yourself AND choosing `match_anchor` doubles the indentation, the most common mistake.
 
-MODIFIERS turn a location into an insertion seam. The seam is named directly, never derived by counting:
+BATCHES. All ops of a call resolve against the file as you read it, and their line numbers refer to that version: do not adjust them for other ops in the batch or sort ops by line. Ops may touch: an insert at either edge of a replaced range, back-to-back deletes, and several inserts at one seam (which land in op order) all apply. Only ops sharing a line, or an insert inside another op's range, are refused with `range_conflict`.
 
-  * `before` → just above a base anchor's span (before its first line).
-  * `after`  → just below a base anchor's span (after its last line).
-  * `between` → at the seam between two adjacent texts you name as `before_text` and `after_text`. The two are matched as one contiguous block (`before_text` then `after_text` on consecutive lines), so their CONCATENATION must be unique — neither side need be unique alone — and the seam falls at the join.
+EXAMPLES (each op also needs `path` and `baseline_fingerprint`):
 
-`before`/`after` wrap a base anchor in `of` and pin to one of its OUTER edges; the span exists only to be unique. Use them when all the context you need to identify the location sits on one side of the seam: put that context in the span and insert `before` it or `after` it.
-
-`between` is for when the context that makes the location unique STRADDLES the seam — some existing lines before the insertion point and the disambiguating line(s) after it (or vice versa). You show the seam by splitting the existing text into the part before it (`before_text`) and the part after it (`after_text`); the engine inserts exactly at that cut. These are DESCRIPTIVE slices of the file framing the seam, not directions for placing content. This is the only way to keep both-sides context in the match while still inserting in the middle of it. Example: to insert after `bar()` where `foo()`/`bar()` is not unique but `foo()`/`bar()`/`baz()` is, use `before_text: "foo()\nbar()"`, `after_text: "baz()"`.
-
-These ops are line-granular: anchors resolve to whole lines, and edits add, replace, or remove whole lines. A `unique_text` match selects the whole line(s) it falls on, never just the matched substring — so for `replace_range`, `content` must be the complete new line(s), including any unchanged text on the matched line(s).
-
-CONTENT for replace/insert is supplied as exactly one of `content` (inline, for short text) or `content_ref` → `contents[label]` (for multi-line bulk). `delete_range` takes no content.
-
-NEWLINE OWNERSHIP: a newline separates lines; it is never part of a line's own text.
-This has three consequences you must respect, because getting them wrong corrupts the file silently or changes where an edit lands.
-(1) `content` is the body of the line(s); a leading or trailing `\n` adds a blank line at that edge (leading `\n` -> a blank line BEFORE your text, trailing `\n` -> a blank line AFTER it).
-Use this deliberately to separate an inserted block from its surroundings — e.g. append `\n` to a new function or test case so a blank line follows it.
-Do NOT add a boundary `\n` you did not intend: it becomes a real blank line in the file.
-Interior newlines are fine and expected for multi-line content.
-(2) A `unique_text` anchor must NOT start with `\n`: a leading newline belongs to the PREVIOUS line, so it silently pulls that line into the matched range and your edit would clobber one line too many — this is REJECTED.
-A TRAILING `\n` in `unique_text`, by contrast, is allowed and useful: it anchors to end-of-line, so `text: "foo\n"` matches the whole line `foo` but not the `foo` inside `foobar`.
-(3) For `between`, the engine supplies the seam newline itself (it matches `before_text` + newline + `after_text`), so `before_text` must not end with `\n` and `after_text` must not start with one.
-
-BATCH ORDERING: every op in one call is resolved against the SAME original file (the snapshot your `baseline_fingerprint` pins), then all are applied together with line-shift bookkeeping handled internally. Line numbers always refer to that original file: an earlier op that grows or shrinks the file does NOT move the numbers a later op should use. Submit ops in any order with original line numbers throughout; do NOT pre-sort ops descending or hand-adjust line numbers to compensate for other edits in the batch.
-Ops may touch: an insert at either edge of a replaced range, back-to-back deletes, and several inserts at one seam (which land in op order) all apply. Only ops sharing a line, or an insert inside another op's range, are refused with `range_conflict`.
-
-INDENTATION: `replace_range` and `insert` REQUIRE an explicit `indent`, because the engine cannot tell whether you already indented `content` yourself. Choose by how you wrote `content`. `indent: "match_anchor"` prepends the anchor span's leading whitespace (taken from its first line) to each content line, so write `content` at column 0 — its internal relative indentation is preserved while the block is shifted to the anchor's depth, and blank lines stay blank. `indent: "preserve"` inserts `content` byte-for-byte, so write the full leading whitespace yourself; this is also the right choice for a multi-line `replace_range` over a mixed-indent region where a single prefix does not fit every line. Do not combine the two by hand: choosing `match_anchor` AND indenting `content` yourself doubles the indentation, the most common failure here.
-
-EXAMPLES (anchors abbreviated; each op also needs `path` and `baseline_fingerprint`):
-
-  Replace lines 10–12, letting the engine indent (content written at column 0):
-    { kind: replace_range,
-      anchor: { by: line_range, start: 10, end: 12 },
-      content: "...", indent: "match_anchor" }
-
-  Rewrite one whole line located by its text (content is the WHOLE line, already indented — so preserve it verbatim):
-    { kind: replace_range,
-      anchor: { by: unique_text, text: "  let total = subtotal" },
+  Rewrite one line found by its text; content is the whole line, already indented:
+    { kind: replace_range, anchor: { by: unique_text, text: "  let total = subtotal\n" },
       content: "  let total = subtotal + tax", indent: "preserve" }
 
-  Insert a guard after a function's opening line, where the signature alone is not unique but signature + first body line is. The disambiguating line sits after the seam, so use `between`: `before_text` is the opening line(s), `after_text` is the line the insert must precede. Content already indented, so preserve:
-    { kind: insert,
-      anchor: { by: between,
-                before_text: "function foo(x)",
-                after_text: "    if x > 42 then" },
-      content: "    if x == nil then return 'dang' end", indent: "preserve" }
-
-  Insert a line above a uniquely-identified line, written at column 0 for the engine to indent:
-    { kind: insert,
-      anchor: { by: before, of: { by: unique_text, text: "return result" } },
+  Insert above a unique line, content at column 0:
+    { kind: insert, anchor: { by: before, of: { by: unique_text, text: "return result" } },
       content: "result = normalize(result)", indent: "match_anchor" }
 
-  Delete a block by line range (no content, no indent):
-    { kind: delete_range, anchor: { by: line_range, start: 40, end: 47 } }
+  Insert after a signature that is unique only together with the line after it:
+    { kind: insert,
+      anchor: { by: between, before_text: "function foo(x)", after_text: "    if x > 42 then" },
+      content: "    if x == nil then return 'dang' end", indent: "preserve" }
 
-  Two edits in one call, original line numbers, any order:
-    [ { kind: replace_range, anchor: { by: line_range, start: 3, end: 3 },
-        content: "...", indent: "match_anchor" },
-      { kind: insert, anchor: { by: after,
-          of: { by: line_range, start: 20, end: 20 } },
-        content: "...", indent: "preserve" } ]
+  Replace lines 10-12 and delete lines 40-47 in one call, both numbered as read:
+    [ { kind: replace_range, anchor: { by: line_range, start: 10, end: 12 }, content: "...", indent: "match_anchor" },
+      { kind: delete_range, anchor: { by: line_range, start: 40, end: 47 } } ]
 ]]
 --------------------------------------------------------------------------------
 
