@@ -506,6 +506,7 @@ describe("mcphub.native.neovim.files.apply_edit.engine.apply read-back", functio
         local rb = await_apply(replace_first(path, fp)).files[1].readback
         assert.is.equal(true, rb.changed)
         assert.is.equal(fingerprint.compute("ONE\ntwo\n"), rb.fingerprint)
+        assert.are.same({ { start_line = 1, lines = { "ONE", "two" } } }, rb.excerpts)
         cleanup_fixture(path, bufnr)
     end)
 

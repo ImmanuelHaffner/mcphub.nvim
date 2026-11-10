@@ -68,21 +68,37 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
             }, out.files)
         end)
 
-        it("offers a fingerprint only for a file still as the model read it", function()
+        it("offers a fingerprint for a file the model has seen as it is now", function()
+            local changed = {
+                fingerprint = "def5678",
+                changed = true,
+                changes = {
+                    { old = { start_line = 4, end_line = 4 }, new = { start_line = 4, end_line = 5 } },
+                    { old = { start_line = 9, end_line = 9 }, new = { start_line = 11, end_line = 10 } },
+                },
+                excerpts = { { start_line = 9, lines = { "x", "y" } } },
+            }
+            local too_big = { fingerprint = "0123456", changed = true, changes = changed.changes }
             local out = wire.format({
                 status = "partial",
                 note = "n",
                 files = {
                     { path = HOME_FILE, status = "completed", readback = { fingerprint = "abc1234", changed = false } },
-                    {
-                        path = HOME_FILE .. "2",
-                        status = "completed",
-                        readback = { fingerprint = "def5678", changed = true },
-                    },
+                    { path = HOME_FILE, status = "completed", readback = changed },
+                    { path = HOME_FILE, status = "completed", readback = too_big },
                 },
             })
             assert.is.equal("n", out.note)
-            assert.are.same({ { file = "~/proj/a.lua", fingerprint = "abc1234" } }, out.files)
+            assert.are.same({
+                { file = "~/proj/a.lua", fingerprint = "abc1234" },
+                {
+                    file = "~/proj/a.lua",
+                    fingerprint = "def5678",
+                    changes = { { was = "4", now = "4-5" }, { was = "9", now = "before 11" } },
+                    excerpts = { " 9\tx\n10\ty" },
+                },
+                { file = "~/proj/a.lua", note = "changed too much to show here; re-read it before editing it again" },
+            }, out.files)
         end)
 
         it("flattens an anchor failure and drops the echoed anchor", function()

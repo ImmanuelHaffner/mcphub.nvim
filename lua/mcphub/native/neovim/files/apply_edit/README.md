@@ -463,12 +463,15 @@ The request's own `anchor` and `baseline_fingerprint` are not echoed back.
 
 ### `files[]`
 
-A file appears only when it has something to add to the entries:
+A file appears whenever it could be read back, which is nearly always:
 
 ```
 {
   file:              string,
-  fingerprint:       string?,     // only while the file is still exactly as the model read it
+  fingerprint:       string?,     // the file now; absent only when it changed too much to show
+  changes:           [ { was: string, now: string } ]?,  // when changed: lines as read -> lines now
+  excerpts:          [ string ]?, // when changed: the changed regions now, numbered, 2 lines of context
+  note:              string?,     // when it changed too much to show
   status:            "cancelled" | "no_changes" | "precondition_failed"?,  // omitted when completed
   cancel_reason:     string?,
   ui_summary:        string?,     // only when the review rejected something
@@ -477,9 +480,10 @@ A file appears only when it has something to add to the entries:
 }
 ```
 
-After its review each file is read back from the buffer (`readback.lua`) and compared with the content the model's `baseline_fingerprint` pins.
-When nothing changed (every op on it failed or was rejected), `fingerprint` is that same value and the model may edit again without re-reading.
-A file that changed carries none: a fingerprint certifies that the model has seen the file, and handing out one for unseen content would bless stale line numbers on the next edit.
+After its review each file is read back from the buffer (`readback.lua`) and diffed against the content the model's `baseline_fingerprint` pins, so format-on-save and concurrent user edits show up too.
+When nothing changed (every op on it failed or was rejected), `fingerprint` is that same value.
+When it changed, the fingerprint comes with `changes` and `excerpts`: together with the model's earlier read they determine the file as it is now, so the model may edit again without re-reading, renumbering by `changes`.
+A fingerprint certifies that the model has seen the file, so when the excerpts would exceed 100 lines both are withheld and `note` asks for a re-read; handing out a fingerprint for unseen content would bless stale line numbers on the next edit.
 
 `diagnostics` are the LSP diagnostics of every severity within 10 lines of an edited range, read after a per-LSP wait (300 ms for lua_ls, 5000 ms for metals, etc.) so the server has time to publish post-write findings.
 Each `Diagnostic`:

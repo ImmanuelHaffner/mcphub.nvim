@@ -21,6 +21,8 @@
 ---
 --- @module "mcphub.native.neovim.files.apply_edit.wire"
 
+local edit_read = require("mcphub.native.neovim.files.apply_edit.read")
+
 local M = {}
 
 local function display_path(path)
@@ -128,11 +130,26 @@ local function file_entry(f)
     if type(s) == "string" and not s:match("^All %d+ block%(s%) were successfully applied") then
         out.ui_summary = s
     end
-    -- A fingerprint only for a file the model has seen as it is now: one that
-    -- is still exactly as it read it. See `readback.lua`.
+    -- A fingerprint only for a file the model has seen as it is now: one still
+    -- exactly as it read it, or one whose every change is shown here. See
+    -- `readback.lua`.
     local rb = f.readback
-    if type(rb) == "table" and rb.changed == false then
-        out.fingerprint = rb.fingerprint
+    if type(rb) == "table" then
+        if rb.changed == false then
+            out.fingerprint = rb.fingerprint
+        elseif rb.excerpts then
+            out.fingerprint = rb.fingerprint
+            out.changes = vim.tbl_map(function(c)
+                return { was = M.lines(c.old), now = M.lines(c.new) }
+            end, rb.changes)
+            if #rb.excerpts > 0 then
+                out.excerpts = vim.tbl_map(function(e)
+                    return edit_read.number_lines(e.lines, e.start_line)
+                end, rb.excerpts)
+            end
+        else
+            out.note = "changed too much to show here; re-read it before editing it again"
+        end
     end
     if next(out) == nil then
         return nil
