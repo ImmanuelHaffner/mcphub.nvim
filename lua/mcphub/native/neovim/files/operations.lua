@@ -120,20 +120,27 @@ end
 
 ---Re-point loaded buffers from `src` onto `dst` after a completed move.
 ---`src` may be a file or a directory; buffers beneath a moved directory follow it.
----@param src string absolute source path
+---Neovim stores buffer names with symlinks resolved, so a buffer is matched
+---against every spelling of the source in `srcs`, not just the one requested.
+---@param srcs string[] absolute source paths: as requested, and resolved
 ---@param dst string absolute destination path
 ---@return string[] moved "old -> new" for each buffer that followed the file
 ---@return string[] unsaved new names of buffers left holding unwritten changes
-local function repoint_buffers(src, dst)
+local function repoint_buffers(srcs, dst)
     local moved, unsaved = {}, {}
     for _, buf in ipairs(vim.api.nvim_list_bufs()) do
         if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" then
             local name = vim.fs.normalize(vim.api.nvim_buf_get_name(buf))
             local new_name
-            if name == src then
-                new_name = dst
-            elseif name:sub(1, #src + 1) == src .. "/" then
-                new_name = dst .. name:sub(#src + 1)
+            for _, src in ipairs(srcs) do
+                if name == src then
+                    new_name = dst
+                elseif name:sub(1, #src + 1) == src .. "/" then
+                    new_name = dst .. name:sub(#src + 1)
+                end
+                if new_name then
+                    break
+                end
             end
             if new_name and pcall(vim.api.nvim_buf_set_name, buf, new_name) then
                 if vim.bo[buf].modified then
@@ -248,6 +255,14 @@ local file_tools = {
                 return res:error("Destination already exists: " .. req.params.new_path)
             end
 
+            -- Resolved now, while the source still exists: buffer names carry the
+            -- resolved spelling, and after the move there is nothing to resolve.
+            local srcs = { src }
+            local real = vim.uv.fs_realpath(src)
+            if real and vim.fs.normalize(real) ~= src then
+                table.insert(srcs, vim.fs.normalize(real))
+            end
+
             local ok, detail = move(src, dst)
             if not ok then
                 return res:error(detail)
@@ -264,7 +279,7 @@ local file_tools = {
             end
 
             local lines = { string.format("Moved %s to %s (%s)", src, dst, detail) }
-            local moved, unsaved = repoint_buffers(src, dst)
+            local moved, unsaved = repoint_buffers(srcs, dst)
             for _, entry in ipairs(moved) do
                 table.insert(lines, "  re-pointed buffer: " .. entry)
             end
