@@ -373,14 +373,13 @@ describe("mcphub.native.neovim.files.apply_edit.planner", function()
             cleanup(path)
         end)
 
-        it("two inserts at the same gap → conflict", function()
+        it("two inserts at the same gap → no conflict (they apply in op order)", function()
             local path = tempfile("a\nb\nc\n")
-            local _, fail = helpers.plan(parsed_input({
+            local plan = assert(helpers.plan(parsed_input({
                 op({ kind = "insert", path = path, anchor = before(lr(2, 2)), content = "A" }),
                 op({ kind = "insert", path = path, anchor = before(lr(2, 2)), content = "B" }),
-            }))
-            assert.is.equal(1, #fail.failures)
-            assert.is.equal(schema.ERROR_REASONS.range_conflict, fail.failures[1].reason)
+            })))
+            assert.is.equal(2, #plan.located_ops)
             cleanup(path)
         end)
 
@@ -394,21 +393,16 @@ describe("mcphub.native.neovim.files.apply_edit.planner", function()
             cleanup(path)
         end)
 
-        it("insert after line N + replace_range starting at N+1 → conflict (conservative)", function()
-            -- Conservative rule: insert after line 3 → position {4, 3} →
-            -- line set {4}. replace_range lines 4..5 → line set {4, 5}.
-            -- Both touch 4 → flagged as conflict. (Technically the insert
-            -- places content between lines 3 and 4, and the replace
-            -- overwrites the original 4..5; whether that's "really" a
-            -- conflict depends on apply order. The conservative rule says
-            -- yes — easier to relax later.)
-            local path = tempfile("a\nb\nc\nd\ne\n")
-            local _, fail = helpers.plan(parsed_input({
+        it("insert at either end of a replaced range → no conflict", function()
+            -- The seams just before line 4 and just after line 5 bound the
+            -- range; the applier joins touching ops into one block.
+            local path = tempfile("a\nb\nc\nd\ne\nf\n")
+            local plan = assert(helpers.plan(parsed_input({
                 op({ path = path, anchor = lr(4, 5), content = "REPL" }),
-                op({ kind = "insert", path = path, anchor = after_(lr(3, 3)), content = "INS" }),
-            }))
-            assert.is.equal(1, #fail.failures)
-            assert.is.equal(schema.ERROR_REASONS.range_conflict, fail.failures[1].reason)
+                op({ kind = "insert", path = path, anchor = after_(lr(3, 3)), content = "BEFORE" }),
+                op({ kind = "insert", path = path, anchor = before(lr(6, 6)), content = "AFTER" }),
+            })))
+            assert.is.equal(3, #plan.located_ops)
             cleanup(path)
         end)
 

@@ -1,34 +1,28 @@
---- Regression test for the widen-introduced range conflict.
+--- Regression tests for the range conflicts that widening introduces.
 ---
---- # The issue this spec pins
+--- # The issue these specs pin
 ---
---- When `ui_backend._test.widen_for_editui` widens a pure-delete-to-EOF
---- block, it borrows the line **before** the deleted range (because there
---- is no line after it). If another op in the same batch targets that
---- borrowed line, the planner's no-conflict invariant — which held over
---- the original (unwidened) ranges — would silently break at the EditUI
---- seam:
+--- `ui_backend._test.widen_for_editui` widens a pure delete or a pure insert
+--- by borrowing a neighbouring line, and a delete-to-EOF borrows the line
+--- **before** the deleted range. If another op in the same batch targets that
+--- borrowed line, the planner's no-conflict invariant — which held over the
+--- original (unwidened) ranges — would silently break at the EditUI seam:
 ---
 ---   * Op A: replace_range on line N         (planner range { N, N })
 ---   * Op B: delete_range on line N+1 (last) (planner range { N+1, N+1 })
 ---
---- The planner sees no overlap. After widening, op B becomes range
---- `{ N, N+1 }` with `replace_lines = [buf[N]]` — the line op A is
---- already replacing. EditUI's `_apply_all_changes` sorts blocks by
---- `start_line` ascending; with two blocks at `start_line = N`, the
---- stable-sort order is undefined, and in practice op B applies after
---- op A, overwriting A's replacement with the original line A wanted to
---- replace.
+--- After widening, op B would become `{ N, N+1 }` with `replace_lines =
+--- [buf[N]]`, the line op A is already replacing, and EditUI's ascending sort
+--- would apply B after A, undoing A.
 ---
---- # What the fix does
+--- # What prevents it
 ---
---- `drive_file` now runs `detect_widen_collisions` against the batch
---- before any widening or EditUI invocation. If any two blocks' post-
---- widen effective ranges overlap, the whole file is refused with a
---- `precondition_failed` outcome carrying one `range_conflict` failure
---- per affected op. The applier turns those into `failed[]` entries.
---- No partial mutation occurs; the buffer and on-disk file remain
---- pristine. Other files in the batch (if any) still get processed.
+--- The applier joins touching ops (A and B above) into one block, which needs
+--- no widening. Ops one line apart can still collide once widened, as when an
+--- insertion before line N borrows N forward and a delete-to-EOF from N+1
+--- borrows N backward; `drive_file` joins those too, keeping line N. Only a
+--- block with no line to borrow at all is refused, as a `precondition_failed`
+--- outcome with one `range_conflict` failure per op and no mutation.
 ---
 --- # Why this lives in its own file
 ---
@@ -137,14 +131,13 @@ local function run(input)
     return response
 end
 
+local function lr(s, e)
+    return { by = "line_range", start = s, ["end"] = e }
+end
+
 describe("widen-introduced range conflict", function()
-    it("refuses the batch when delete-to-EOF would borrow into a replace target", function()
-        -- Fixture: 3 lines. Op 1 replaces line 2; op 2 deletes line 3 (last).
-        -- Planner ranges {2,2} and {3,3} — no overlap; planner accepts.
-        -- After widening op 2 would become {2, 3} with replace = [original-line-2],
-        -- silently undoing op 1. drive_file detects the post-widen overlap
-        -- and refuses; both ops surface as range_conflict failures.
-        local path, bufnr, fp = fixture_file({ "A", "B", "C" }, "_widen_conflict.txt")
+    it("applies a replace next to a delete-to-EOF as one joined block", function()
+        local path, bufnr, fp = fixture_file({ "A", "B", "C" }, "_widen_joined.txt")
 
         local response = run({
             ops = {
@@ -152,53 +145,69 @@ describe("widen-introduced range conflict", function()
                     kind = "replace_range",
                     path = path,
                     baseline_fingerprint = fp,
-                    anchor = { by = "line_range", start = 2, ["end"] = 2 },
+                    anchor = lr(2, 2),
                     content = "B-NEW",
                     indent = "match_anchor",
                 },
-                {
-                    kind = "delete_range",
-                    path = path,
-                    baseline_fingerprint = fp,
-                    anchor = { by = "line_range", start = 3, ["end"] = 3 },
-                },
+                { kind = "delete_range", path = path, baseline_fingerprint = fp, anchor = lr(3, 3) },
             },
         })
 
-        -- Failure shape: status='failed', both ops in failed[] with reason
-        -- range_conflict, applied[] and rejected[] empty.
+        assert.is.equal("applied", response.status)
+        assert.is.equal(2, #response.applied)
+        assert.are.same({ "A", "B-NEW" }, vim.fn.readfile(path))
+
+        cleanup_fixture(path, bufnr)
+    end)
+
+    it("joins an insert and a delete-to-EOF that would borrow the same line", function()
+        -- The insert before line 2 borrows line 2 forward; deleting line 3,
+        -- the last, borrows line 2 backward. Neither op touches line 2.
+        local path, bufnr, fp = fixture_file({ "A", "B", "C" }, "_widen_gap.txt")
+
+        local response = run({
+            ops = {
+                {
+                    kind = "insert",
+                    path = path,
+                    baseline_fingerprint = fp,
+                    anchor = { by = "before", of = lr(2, 2) },
+                    content = "X",
+                    indent = "preserve",
+                },
+                { kind = "delete_range", path = path, baseline_fingerprint = fp, anchor = lr(3, 3) },
+            },
+        })
+
+        assert.is.equal("applied", response.status)
+        assert.is.equal(2, #response.applied)
+        assert.are.same({ "A", "X", "B" }, vim.fn.readfile(path))
+
+        cleanup_fixture(path, bufnr)
+    end)
+
+    it("refuses deleting every line in touching ops, naming each op", function()
+        local path, bufnr, fp = fixture_file({ "A", "B" }, "_widen_whole.txt")
+
+        local response = run({
+            ops = {
+                { kind = "delete_range", path = path, baseline_fingerprint = fp, anchor = lr(1, 1) },
+                { kind = "delete_range", path = path, baseline_fingerprint = fp, anchor = lr(2, 2) },
+            },
+        })
+
         assert.is.equal("failed", response.status)
         assert.is.equal(0, #response.applied)
-        assert.is.equal(0, #response.rejected)
         assert.is.equal(2, #response.failed)
+        for i, f in ipairs(response.failed) do
+            assert.is.equal(i, f.op_index)
+            assert.is.equal("range_conflict", f.reason)
+            assert.are.same({ start_line = i, end_line = i }, f.range)
+        end
 
-        -- Each failure names the other op as the conflict partner. Order
-        -- in failed[] matches block order in the batch.
-        local f1, f2 = response.failed[1], response.failed[2]
-        assert.is.equal(1, f1.op_index)
-        assert.is.equal("range_conflict", f1.reason)
-        assert.is.equal(1, #f1.conflicting_op_indices)
-        assert.is.equal(2, f1.conflicting_op_indices[1])
-        assert.is.equal(2, f2.op_index)
-        assert.is.equal("range_conflict", f2.reason)
-        assert.is.equal(1, #f2.conflicting_op_indices)
-        assert.is.equal(1, f2.conflicting_op_indices[1])
-
-        -- Both failures carry the original (pre-widen) range so the LLM
-        -- can correlate them back to the ops it submitted.
-        assert.is.equal(2, f1.range.start_line)
-        assert.is.equal(2, f1.range.end_line)
-        assert.is.equal(3, f2.range.start_line)
-        assert.is.equal(3, f2.range.end_line)
-
-        -- No mutation: buffer and on-disk file untouched. This is the
-        -- critical correctness property the refusal exists to preserve.
+        -- No mutation: the refusal exists to preserve this.
         assert.is.equal(false, vim.bo[bufnr].modified)
-        local on_disk = vim.fn.readfile(path)
-        assert.is.equal(3, #on_disk)
-        assert.is.equal("A", on_disk[1])
-        assert.is.equal("B", on_disk[2])
-        assert.is.equal("C", on_disk[3])
+        assert.are.same({ "A", "B" }, vim.fn.readfile(path))
 
         cleanup_fixture(path, bufnr)
     end)

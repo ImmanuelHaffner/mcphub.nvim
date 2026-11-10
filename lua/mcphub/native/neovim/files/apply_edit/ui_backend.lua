@@ -27,6 +27,7 @@
 
 local M = {}
 
+local blocks_mod = require("mcphub.native.neovim.files.apply_edit.blocks")
 local buffer = require("mcphub.native.neovim.utils.buffer")
 local fingerprint = require("mcphub.native.neovim.files.apply_edit.fingerprint")
 local schema = require("mcphub.native.neovim.files.apply_edit.schema")
@@ -224,12 +225,14 @@ end
 --- wrong output and a dishonest `applied` response — the very failure
 --- mode the structured-anchor design exists to eliminate.
 ---
+--- `drive_file` first joins such blocks (`join_widen_collisions`), so in
+--- practice only blocks with no line to borrow reach a failure here.
+---
 --- The refusal is at-file granularity, not at-batch: a batch with two
 --- files where only one has a collision still gets the other file
---- processed. Each colliding op surfaces as `failed[]` with reason
---- `range_conflict` and the conflicting op's index in
---- `conflicting_op_indices` so the LLM can re-issue the batch in a way
---- the applier can handle (e.g. split into two batches).
+--- processed. Each op of a colliding block surfaces as `failed[]` with
+--- reason `range_conflict` and the conflicting ops' indices in
+--- `conflicting_op_indices`.
 ---
 --- ## What counts as a collision
 ---
@@ -288,27 +291,35 @@ local function detect_widen_collisions(bufnr, blocks)
         end
     end
 
-    -- Build failure entries. One per affected op, listing every other op
-    -- it collides with. Stable order: by block list order.
+    -- Build failure entries: one per op of every affected block, listing
+    -- every op it collides with. Stable order: by block list order.
+    local function op_indices(block_indices)
+        local out = {}
+        for _, j in ipairs(block_indices) do
+            for _, m in ipairs(blocks_mod.members(blocks[j])) do
+                out[#out + 1] = m.op_index
+            end
+        end
+        return out
+    end
+
     local failures = {}
     for i, b in ipairs(blocks) do
         local peers = conflicts_by_block[i]
         if #peers > 0 then
-            local peer_op_indices = {}
-            for _, j in ipairs(peers) do
-                peer_op_indices[#peer_op_indices + 1] = blocks[j].op_index
+            for _, m in ipairs(blocks_mod.members(b)) do
+                failures[#failures + 1] = {
+                    op_index = m.op_index,
+                    reason = "range_conflict",
+                    -- No op numbers in the text: the wire format renumbers ops
+                    -- from 0, and the entry already names its peers.
+                    message = "this op cannot be applied in this batch: its effective range after "
+                        .. "EditUI widening overlaps with the ops in `conflict_ops`. Re-issue the ops in "
+                        .. "separate batches, or change the anchor of one to a non-adjacent location.",
+                    range = { start_line = m.range.start_line, end_line = m.range.end_line },
+                    conflicting_op_indices = op_indices(peers),
+                }
             end
-            failures[#failures + 1] = {
-                op_index = b.op_index,
-                reason = "range_conflict",
-                -- No op numbers in the text: the wire format renumbers ops
-                -- from 0, and the entry already names its peers.
-                message = "this op cannot be applied in this batch: its effective range after "
-                    .. "EditUI widening overlaps with the ops in `conflict_ops`. Re-issue the ops in "
-                    .. "separate batches, or change the anchor of one to a non-adjacent location.",
-                range = { start_line = b.range.start_line, end_line = b.range.end_line },
-                conflicting_op_indices = peer_op_indices,
-            }
         end
     end
 
@@ -316,29 +327,81 @@ local function detect_widen_collisions(bufnr, blocks)
     -- These don't have peers — they fail in isolation.
     for _, i in ipairs(nil_blocks) do
         local b = blocks[i]
-        local already_listed = false
-        for _, f in ipairs(failures) do
-            if f.op_index == b.op_index then
-                already_listed = true
-                break
+        for _, m in ipairs(blocks_mod.members(b)) do
+            local already_listed = false
+            for _, f in ipairs(failures) do
+                if f.op_index == m.op_index then
+                    already_listed = true
+                    break
+                end
             end
-        end
-        if not already_listed then
-            failures[#failures + 1] = {
-                op_index = b.op_index,
-                reason = "range_conflict",
-                message = "this op cannot be applied by the EditUI driver: "
-                    .. (
-                        (b.kind == "delete_range") and "whole-file deletion has no neighbouring line to borrow"
-                        or "insertion into an empty buffer has no neighbouring line to borrow"
-                    ),
-                range = { start_line = b.range.start_line, end_line = b.range.end_line },
-                conflicting_op_indices = {},
-            }
+            if not already_listed then
+                failures[#failures + 1] = {
+                    op_index = m.op_index,
+                    reason = "range_conflict",
+                    message = "this op cannot be applied by the EditUI driver: "
+                        .. (
+                            (b.kind == "delete_range") and "whole-file deletion has no neighbouring line to borrow"
+                            or "insertion into an empty buffer has no neighbouring line to borrow"
+                        ),
+                    range = { start_line = m.range.start_line, end_line = m.range.end_line },
+                    conflicting_op_indices = {},
+                }
+            end
         end
     end
 
     return failures
+end
+
+--- Join blocks whose post-widen ranges would overlap, so that widening no
+--- longer collides.
+---
+--- The applier has already joined blocks that touch, which leaves at least one
+--- untouched line between any two. Widening can still claim that line from
+--- both sides, as when a delete-to-EOF borrows backward the very line an
+--- insertion just before it borrows forward. Such blocks are joined with the
+--- lines between them kept as they are; a joined block is rarely pure, so it
+--- needs no widening at all. Only the blocks with no line to borrow (a
+--- whole-file delete, an insertion into an empty buffer) remain for
+--- `detect_widen_collisions` to refuse.
+---
+--- @param bufnr  integer
+--- @param blocks mcphub.edit.applier.Block[]
+--- @return mcphub.edit.applier.Block[]   joined
+--- @return table<string, string[]>       sources  For each returned block_id, the `blocks` ids it covers.
+local function join_widen_collisions(bufnr, blocks)
+    local out, sources = {}, {}
+    for _, b in ipairs(blocks) do
+        out[#out + 1] = b
+        sources[b.block_id] = { b.block_id }
+    end
+    local lines
+    while true do
+        local pair
+        for i = 1, #out do
+            local ri = effective_range_after_widen(bufnr, out[i])
+            for j = i + 1, #out do
+                local rj = effective_range_after_widen(bufnr, out[j])
+                if ri and rj and ri.start_line <= rj.end_line and rj.start_line <= ri.end_line then
+                    pair = { i, j }
+                    break
+                end
+            end
+            if pair then
+                break
+            end
+        end
+        if not pair then
+            return out, sources
+        end
+        lines = lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+        local a, b = out[pair[1]], out[pair[2]]
+        local joined = blocks_mod.join({ a, b }, lines)
+        sources[joined.block_id] = vim.list_extend(vim.list_slice(sources[a.block_id]), sources[b.block_id])
+        out[pair[1]] = joined
+        table.remove(out, pair[2])
+    end
 end
 
 --- Build the `LocatedBlock`-shaped table `EditUI` expects, from one of the
@@ -707,18 +770,20 @@ local function stale_outcome(request)
     local baseline = fingerprint.compute(request.original_content)
     local failures, seen = {}, {}
     for _, b in ipairs(request.blocks) do
-        if not seen[b.op_index] then
-            seen[b.op_index] = true
-            failures[#failures + 1] = {
-                op_index = b.op_index,
-                reason = schema.ERROR_REASONS.stale_fingerprint,
-                path = request.file_path,
-                baseline_fingerprint = baseline,
-                message = "the file changed after the batch was planned; this op was not applied.",
-                hint = "the file changed while this edit waited to be applied. "
-                    .. "Re-read it with neovim__read_with_fingerprint and replan "
-                    .. "against the current content.",
-            }
+        for _, m in ipairs(blocks_mod.members(b)) do
+            if not seen[m.op_index] then
+                seen[m.op_index] = true
+                failures[#failures + 1] = {
+                    op_index = m.op_index,
+                    reason = schema.ERROR_REASONS.stale_fingerprint,
+                    path = request.file_path,
+                    baseline_fingerprint = baseline,
+                    message = "the file changed after the batch was planned; this op was not applied.",
+                    hint = "the file changed while this edit waited to be applied. "
+                        .. "Re-read it with neovim__read_with_fingerprint and replan "
+                        .. "against the current content.",
+                }
+            end
         end
     end
     return {
@@ -754,20 +819,23 @@ function M.drive_file(request, file_cb, config)
     -- can complete without mcphub's full plugin tree on `runtimepath`.
     -- Useful for tests that exercise refusal semantics under `-u NONE`.
 
-    -- Refuse the batch up-front if any post-widen ranges would overlap.
+    -- Note: `EditUI` is required lazily below (just before instantiation),
+    -- not at function entry, so collision-detection and no-changes paths
+    -- can complete without mcphub's full plugin tree on `runtimepath`.
+    -- Useful for tests that exercise refusal semantics under `-u NONE`.
+
     -- Widening adapts our zero-width / empty-replace blocks to EditUI's
-    -- input shape by borrowing one neighbouring buffer line — that
-    -- borrowing can introduce conflicts the planner could not have seen
-    -- in the original (unwidened) ranges. Applying anyway would let
+    -- input shape by borrowing one neighbouring buffer line, which can make
+    -- two blocks the planner saw apart overlap. Applying anyway would let
     -- EditUI's `_apply_all_changes` sort the colliding blocks by
-    -- `start_line` (with ties resolved by Lua's non-stable sort), so
-    -- one block would clobber the other silently. We surface this as
-    -- a per-file `precondition_failed` outcome carrying one
-    -- `range_conflict` failure per affected op; the applier turns
-    -- those into `failed[]` response entries. The batch continues
-    -- with subsequent files.
+    -- `start_line` (with ties resolved by Lua's non-stable sort), so one
+    -- block would clobber the other silently. Such blocks are joined first;
+    -- what still cannot be widened is refused as a per-file
+    -- `precondition_failed` outcome carrying one `range_conflict` failure
+    -- per affected op, and the batch continues with subsequent files.
+    local blocks, sources = join_widen_collisions(request.bufnr, request.blocks)
     do
-        local failures = detect_widen_collisions(request.bufnr, request.blocks)
+        local failures = detect_widen_collisions(request.bufnr, blocks)
         if #failures > 0 then
             return file_cb({
                 status = "precondition_failed",
@@ -787,7 +855,7 @@ function M.drive_file(request, file_cb, config)
     -- reachable here (collision detection catches it upstream), but we
     -- keep the assertion to lock in that invariant.
     local located_blocks, block_ids = {}, {}
-    for _, b in ipairs(request.blocks) do
+    for _, b in ipairs(blocks) do
         local widened = widen_for_editui(request.bufnr, b)
         assert(
             widened ~= nil,
@@ -829,7 +897,12 @@ function M.drive_file(request, file_cb, config)
 
     local function finalise(status, cancel_reason)
         local completed_hunks = vim.deepcopy(ui.state and ui.state.completed_hunks or {})
-        local per_block = aggregate_per_block(completed_hunks, block_ids)
+        local per_block = {}
+        for block_id, block_status in pairs(aggregate_per_block(completed_hunks, block_ids)) do
+            for _, source_id in ipairs(sources[block_id]) do
+                per_block[source_id] = block_status
+            end
+        end
 
         -- ## Diagnostics: own the settle wait, suppress mcphub's prose block
         --
@@ -938,6 +1011,7 @@ M._test = {
     widen_for_editui = widen_for_editui,
     effective_range_after_widen = effective_range_after_widen,
     detect_widen_collisions = detect_widen_collisions,
+    join_widen_collisions = join_widen_collisions,
     collect_diagnostics = collect_diagnostics,
     intersects_edited = intersects_edited,
     DEFAULT_DIAGNOSTIC_CONTEXT_LINES = DEFAULT_DIAGNOSTIC_CONTEXT_LINES,

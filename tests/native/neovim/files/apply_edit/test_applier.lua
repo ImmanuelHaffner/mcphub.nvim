@@ -151,10 +151,11 @@ describe("apply_plan with synthetic drivers", function()
 
     describe("make_selective (mixed accept/reject)", function()
         it("returns status=partial with the right applied/rejected split", function()
-            local path, bufnr, fp = fixture_file({ "one", "two", "three", "four" }, "_mixed.txt")
+            local path, bufnr, fp = fixture_file({ "one", "two", "three", "four", "five" }, "_mixed.txt")
             -- Op 1: replace line 1 (accept).
             -- Op 2: replace line 3 (reject).
-            -- Op 3: replace line 4 (accept).
+            -- Op 3: replace line 5 (accept). Kept apart from op 2: touching ops are
+            -- joined into one block, which takes a single decision.
             local response = run({
                 ops = {
                     {
@@ -177,8 +178,8 @@ describe("apply_plan with synthetic drivers", function()
                         kind = "replace_range",
                         path = path,
                         baseline_fingerprint = fp,
-                        anchor = { by = "line_range", start = 4, ["end"] = 4 },
-                        content = "FOUR-NEW",
+                        anchor = { by = "line_range", start = 5, ["end"] = 5 },
+                        content = "FIVE-NEW",
                         indent = "match_anchor",
                     },
                 },
@@ -200,7 +201,8 @@ describe("apply_plan with synthetic drivers", function()
             assert.is.equal("ONE-NEW", on_disk[1])
             assert.is.equal("two", on_disk[2])
             assert.is.equal("three", on_disk[3]) -- op 2 rejected, line unchanged
-            assert.is.equal("FOUR-NEW", on_disk[4])
+            assert.is.equal("four", on_disk[4])
+            assert.is.equal("FIVE-NEW", on_disk[5])
 
             cleanup_fixture(path, bufnr)
         end)
@@ -315,8 +317,8 @@ describe("apply_plan with synthetic drivers", function()
                         kind = "replace_range",
                         path = path,
                         baseline_fingerprint = fp,
-                        anchor = { by = "line_range", start = 2, ["end"] = 2 },
-                        content = "B-NEW",
+                        anchor = { by = "line_range", start = 3, ["end"] = 3 },
+                        content = "C-NEW",
                         indent = "match_anchor",
                     },
                 },
@@ -326,6 +328,68 @@ describe("apply_plan with synthetic drivers", function()
             assert.is.equal(1, #response.applied)
             assert.is.equal(1, #response.rejected)
             assert.is.equal("partially_rejected", response.rejected[1].reason)
+
+            cleanup_fixture(path, bufnr)
+        end)
+    end)
+
+    describe("touching ops", function()
+        local function op(kind, path, fp, anchor, content)
+            return {
+                kind = kind,
+                path = path,
+                baseline_fingerprint = fp,
+                anchor = anchor,
+                content = content,
+                indent = content and "preserve" or nil,
+            }
+        end
+        local function lr(s, e)
+            return { by = "line_range", start = s, ["end"] = e }
+        end
+
+        it("applies inserts at both seams of a replaced range, and the deletes after it", function()
+            local path, bufnr, fp = fixture_file({ "a", "b", "c", "d", "e" }, "_touching.txt")
+            local response = run({
+                ops = {
+                    op("replace_range", path, fp, lr(2, 2), "B"),
+                    op("insert", path, fp, { by = "after", of = lr(2, 2) }, "after-b"),
+                    op("insert", path, fp, { by = "before", of = lr(2, 2) }, "before-b"),
+                    op("delete_range", path, fp, lr(3, 3)),
+                    op("delete_range", path, fp, lr(4, 4)),
+                    op("insert", path, fp, { by = "before", of = lr(2, 2) }, "before-b-2"),
+                },
+            }, drivers.accept_all)
+
+            assert.is.equal("applied", response.status)
+            assert.is.equal(6, #response.applied)
+            assert.are.same(
+                { "a", "before-b", "before-b-2", "B", "after-b", "e" },
+                vim.fn.readfile(path),
+                "inserts at one seam keep their op order"
+            )
+
+            cleanup_fixture(path, bufnr)
+        end)
+
+        it("reports a joined block's decision for every op it absorbed", function()
+            local path, bufnr, fp = fixture_file({ "a", "b", "c", "d" }, "_touching_reject.txt")
+            local response = run({
+                ops = {
+                    op("replace_range", path, fp, lr(1, 1), "A"),
+                    op("replace_range", path, fp, lr(2, 2), "B"),
+                    op("replace_range", path, fp, lr(4, 4), "D"),
+                },
+            }, drivers.make_selective({ ["op1_r1+op2_r1"] = "reject" }))
+
+            assert.is.equal("partial", response.status)
+            assert.is.equal(1, #response.applied)
+            assert.is.equal(3, response.applied[1].op_index)
+            assert.is.equal(2, #response.rejected)
+            assert.is.equal(1, response.rejected[1].op_index)
+            assert.is.equal(2, response.rejected[2].op_index)
+            assert.are.same({ start_line = 2, end_line = 2 }, response.rejected[2].range)
+            assert.are.same({ "a", "b", "c", "D" }, vim.fn.readfile(path))
 
             cleanup_fixture(path, bufnr)
         end)

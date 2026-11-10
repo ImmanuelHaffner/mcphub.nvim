@@ -133,19 +133,27 @@ local function resolve_content(op, contents)
     return nil -- delete_range
 end
 
---- Test whether two resolved ranges conflict (share any line in their
---- inclusive line sets, per the MVP conservative rule).
+--- Test whether two resolved ranges conflict.
+---
+--- Two ranges conflict when they share a line. An insertion (`{ N, N-1 }`,
+--- the seam before line N) conflicts only with a range it would split, one
+--- that holds both line N-1 and line N; at either end of a range its place is
+--- unambiguous. Insertions at one seam never conflict: they go in op order.
+--- Ops that merely touch are joined into one block by the applier.
 ---
 --- @param a mcphub.edit.ResolvedRange
 --- @param b mcphub.edit.ResolvedRange
 --- @return boolean
 local function ranges_conflict(a, b)
-    local as, ae = a.start_line, a.end_line
-    local bs, be = b.start_line, b.end_line
-    -- Normalise zero-width into a single line marker.
-    local a_lo, a_hi = as, (ae < as) and as or ae
-    local b_lo, b_hi = bs, (be < bs) and bs or be
-    return a_lo <= b_hi and b_lo <= a_hi
+    local a_ins, b_ins = a.end_line < a.start_line, b.end_line < b.start_line
+    if a_ins and b_ins then
+        return false
+    elseif a_ins then
+        return b.start_line < a.start_line and a.start_line <= b.end_line
+    elseif b_ins then
+        return a.start_line < b.start_line and b.start_line <= a.end_line
+    end
+    return a.start_line <= b.end_line and b.start_line <= a.end_line
 end
 
 --- Read all files referenced by `ops`, returning a `{path → FileRecord}`

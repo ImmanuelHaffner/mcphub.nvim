@@ -306,8 +306,9 @@ validation produces structured errors with `op_index`, `path` (JSON
 Pointer), `reason`, `message`, `hint`, `expected`, `got`.
 
 **`planner.lua`** — turns parsed ops into a `Plan`. Resolves anchors,
-validates fingerprints, detects pre-widen range conflicts within a
-file. Output is `{ records, located_ops, warnings }`.
+validates fingerprints, detects range conflicts within a file: ops that
+share a line, or an insertion seam inside another op's range. Ops that
+only touch pass. Output is `{ records, located_ops, warnings }`.
 
 **`anchors/init.lua`** — dispatcher. Calls into the appropriate
 resolver based on `anchor.by`.
@@ -350,6 +351,12 @@ why this exists.
 caller-supplied `drive_file`, classifies per-block outcomes into
 `applied[]` / `rejected[]` / `failed[]`. Knows nothing about mcphub.
 
+**`blocks.lua`** — joins touching blocks (`merge_touching`, called by the
+applier) so no driver sees two blocks whose application order matters; a
+joined block lists the blocks it absorbed in `members`, and its single
+status is reported for each. `join` also bridges a gap with the original
+lines, which `ui_backend` uses for widening collisions.
+
 ### The mcphub-facing files
 
 **`init.lua`** — the tool surface. Returns an `MCPTool[]` array declaring
@@ -365,16 +372,19 @@ calls `add_tool` itself. Calls `engine.apply` for apply and
   EditUI's shape (which doesn't model them natively) by borrowing one
   neighbouring buffer line.
 - `effective_range_after_widen` — pure prediction of the post-widen range.
-- `detect_widen_collisions` — refuses batches where widening would
-  produce overlaps that the planner couldn't have seen. Surfaces as
-  `precondition_failed` with `range_conflict` failures.
+- `join_widen_collisions` — joins blocks whose widened ranges would
+  overlap, keeping the lines between them.
+- `detect_widen_collisions` — refuses what joining cannot fix, a block
+  with no line to borrow (whole-file delete, insert into an empty
+  buffer). Surfaces as `precondition_failed` with `range_conflict`
+  failures.
 - `collect_diagnostics` — translates `vim.diagnostic.Diagnostic` to our
   `Diagnostic` shape.
 - `resolve_lsp_wait_ms` — per-LSP timeout table; max across attached
   clients; 0 when no LSP.
-- `drive_file` — the orchestrator. Refuses early on collisions,
-  otherwise widens, instantiates `EditUI`, snapshots state before
-  cleanup, builds the `FileOutcome`.
+- `drive_file` — the orchestrator. Joins colliding blocks, refuses
+  early on what remains, otherwise widens, instantiates `EditUI`,
+  snapshots state before cleanup, builds the `FileOutcome`.
 
 ## Test layout
 
@@ -495,10 +505,15 @@ load-bearing, not an optimisation.
 ### Post-widen range conflicts
 
 Widening can introduce range conflicts the planner couldn't see in
-the pre-widen shapes. `detect_widen_collisions` runs at the bridge
-*before* any widening, refusing the batch with `precondition_failed`
-when collisions exist. This is correctness-critical: without it, a
-delete-to-EOF adjacent to a replace silently loses the replace.
+the pre-widen shapes: without handling, a delete-to-EOF adjacent to a
+replace silently loses the replace. The applier's join of touching
+blocks removes most of them, and `join_widen_collisions` the rest (an
+insert one line above a delete-to-EOF borrows the same line), so
+`detect_widen_collisions` only refuses blocks with nothing to borrow.
+
+A joined block is reviewed as one EditUI block, so its ops share one
+status: rejecting any hunk of it reports every absorbed op as
+`partially_rejected`. The `files[]` read-back shows what actually landed.
 
 ### Diagnostic wait is per-LSP, not flat
 

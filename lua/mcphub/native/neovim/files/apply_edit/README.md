@@ -332,9 +332,11 @@ the file does **not** move the line numbers a later op should use.
 So submit ops in any order, using original line numbers throughout. Do
 **not** pre-sort ops descending by line, and do **not** hand-adjust line
 numbers to compensate for the net line-count change of other edits in the
-batch — the engine already does this. (Overlapping edits are a different
-matter: two ops whose ranges touch the same lines are refused with
-`range_conflict`; see Errors below.)
+batch — the engine already does this. Ops may touch without overlapping:
+an insert at either edge of a replaced range, back-to-back deletes, and
+several inserts at one seam (applied in op order) are joined into one
+reviewed block. Two ops sharing a line, or an insert inside another op's
+range, are refused with `range_conflict`; see Errors below.
 
 
 ### Content sources
@@ -452,7 +454,7 @@ A failure that applied nothing (schema or planning) adds a `note` saying so: eve
 
 A dry run that resolves returns `planned[]` instead of applying: one entry per op (per range, for `occurrence: "all"`) with its `lines` and a numbered `preview` of the lines that frame it — all of a range of up to three lines, the first and last line of a longer one, the two neighbours of an insertion seam — because that is where an off-by-one shows.
 A dry run that does not resolve fails exactly like a real call.
-Conflicts the EditUI driver detects after widening adjacent edits are not visible to a dry run and still surface at apply time.
+Deleting every line of a file, which the EditUI driver cannot express, is not visible to a dry run and still fails at apply time.
 
 ### Entries
 
@@ -563,7 +565,7 @@ The engine itself reports these as `reason: "schema_invalid"` with a `sub_reason
 
 | `reason`              | Meaning                                                    | Recovery                                                                    |
 | --------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `range_conflict`      | Two ops in the same file would touch overlapping ranges, or a delete-to-end-of-file would clobber an adjacent op. | Split the batch into multiple separate calls, or rewrite one op to anchor elsewhere. The entry carries `conflicting_op_indices`. |
+| `range_conflict`      | Two ops in the same file share a line, an insert falls inside another op's range, or the ops would delete every line of the file. | Merge the two ops into one, split the batch into separate calls, or rewrite one op to anchor elsewhere. The entry carries `conflicting_op_indices`. |
 | `not_attempted`       | An earlier file in the batch was cancelled; this op was never reached. | Recoverable by retrying the batch (or just the not-attempted ops) once the cancelled file is resolved. |
 
 ## `neovim__read_with_fingerprint`

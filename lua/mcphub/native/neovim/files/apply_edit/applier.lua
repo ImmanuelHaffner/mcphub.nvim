@@ -65,6 +65,9 @@
 --- @field kind          string       'replace_range' | 'insert' | 'delete_range'.
 --- @field range         { start_line: integer, end_line: integer }  1-based inclusive; insertion is { N, N-1 }.
 --- @field replace_lines string[]     Bytes to insert; `{}` for `delete_range`.
+--- @field members       mcphub.edit.applier.Block[]?  Present on a block joined from touching ones (see
+---                                   `blocks.lua`): the blocks it stands for, in position order. Its
+---                                   status in `per_block` applies to each of them.
 
 --- Per-file request passed to `drive_file`.
 --- @class mcphub.edit.applier.FileRequest
@@ -148,6 +151,7 @@
 --- @field errors   integer  whole-file error count
 --- @field warnings integer  whole-file warning count
 
+local blocks_mod = require("mcphub.native.neovim.files.apply_edit.blocks")
 local readback = require("mcphub.native.neovim.files.apply_edit.readback")
 
 local M = {}
@@ -227,7 +231,9 @@ end
 --- A block represents one (op_index, range) pair. For `delete_range +
 --- occurrence:"all"` one op produces multiple blocks. The block carries
 --- everything the driver needs to mutate the buffer plus the back-
---- references the applier uses to classify the outcome.
+--- references the applier uses to classify the outcome. Blocks that touch
+--- (no untouched line between them) are joined into one, so a driver never
+--- sees two blocks whose order of application matters.
 ---
 --- The shape returned here is the **pure data contract** between the
 --- applier and the `drive_file` callback. It contains no mcphub types.
@@ -248,7 +254,7 @@ local function build_blocks(file_ops)
             }
         end
     end
-    return blocks
+    return blocks_mod.merge_touching(blocks)
 end
 
 --------------------------------------------------------------------------------
@@ -273,25 +279,27 @@ local function classify_outcome(blocks, outcome, file_path)
 
     for _, block in ipairs(blocks) do
         local status = per_block[block.block_id]
-        local entry = {
-            op_index = block.op_index,
-            path = file_path,
-            kind = block.kind,
-            range = { start_line = block.range.start_line, end_line = block.range.end_line },
-        }
+        for _, member in ipairs(blocks_mod.members(block)) do
+            local entry = {
+                op_index = member.op_index,
+                path = file_path,
+                kind = member.kind,
+                range = { start_line = member.range.start_line, end_line = member.range.end_line },
+            }
 
-        if outcome.status == "cancelled" and status == nil then
-            entry.reason = "cancelled"
-            rejected[#rejected + 1] = entry
-        elseif status == "rejected" then
-            entry.reason = "rejected"
-            rejected[#rejected + 1] = entry
-        elseif status == "partial" then
-            entry.reason = "partially_rejected"
-            rejected[#rejected + 1] = entry
-        else
-            -- 'accepted', 'skipped' (no-op), or absent on a completed file.
-            applied[#applied + 1] = entry
+            if outcome.status == "cancelled" and status == nil then
+                entry.reason = "cancelled"
+                rejected[#rejected + 1] = entry
+            elseif status == "rejected" then
+                entry.reason = "rejected"
+                rejected[#rejected + 1] = entry
+            elseif status == "partial" then
+                entry.reason = "partially_rejected"
+                rejected[#rejected + 1] = entry
+            else
+                -- 'accepted', 'skipped' (no-op), or absent on a completed file.
+                applied[#applied + 1] = entry
+            end
         end
     end
     return applied, rejected
