@@ -628,4 +628,82 @@ T["session_completion_via_save"] = function()
     eq(final_result.current_lines[2], '    return "save_changed"')
 end
 
+-- The hint for the current hunk, as `{ row, above, virt_text, width, text_width }`
+local function hint_mark()
+    return _G.child.lua_func(function()
+        local ns = vim.api.nvim_get_namespaces()["mcphub-editor-hints"]
+        local marks = vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, { details = true })
+        local mark = marks[1]
+        local width = 0
+        for _, chunk in ipairs(mark[4].virt_lines[1]) do
+            width = width + vim.api.nvim_strwidth(chunk[1])
+        end
+        local info = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1]
+        return {
+            count = #marks,
+            row = mark[2],
+            above = mark[4].virt_lines_above or false,
+            virt_text = mark[4].virt_text,
+            width = width,
+            text_width = info.width - info.textoff,
+        }
+    end)
+end
+
+T["hint"] = new_set()
+
+T["hint"]["sits on its own line right before a hunk in the middle of the file"] = function()
+    start_session(
+        { "function test()", '    return "old"', "end" },
+        '<<<<<<< SEARCH\n    return "old"\n=======\n    return "new"\n>>>>>>> REPLACE'
+    )
+    local hint = hint_mark()
+    eq(hint.count, 1)
+    eq(hint.virt_text, nil)
+    -- Below the line before the hunk, hence before the removed lines drawn above the hunk
+    eq({ hint.row, hint.above }, { 0, false })
+end
+
+T["hint"]["follows removed lines that are drawn below the first line"] = function()
+    start_session(
+        { "function test()", '    return "old"', "end" },
+        "<<<<<<< SEARCH\nfunction test()\n=======\nfunction renamed()\n>>>>>>> REPLACE"
+    )
+    local hint = hint_mark()
+    local removed = _G.child.lua_func(function()
+        local hunk = _G.session.ui.state.hunk_blocks[1]
+        local ns = _G.session.ui.highlights.namespace_diff
+        local mark = vim.api.nvim_buf_get_extmark_by_id(0, ns, hunk.del_extmark_id, { details = true })
+        return { mark[1], mark[3].virt_lines_above or false }
+    end)
+    eq(removed, { 0, false })
+    eq({ hint.row, hint.above }, { 0, false })
+end
+
+T["hint"]["goes after an addition at the top of the file"] = function()
+    start_session(
+        { "function test()", '    return "old"', "end" },
+        "<<<<<<< SEARCH\nfunction test()\n=======\n-- header\nfunction test()\n>>>>>>> REPLACE"
+    )
+    local hint = hint_mark()
+    -- A virtual line above the first buffer line is never scrolled into view
+    eq({ hint.row, hint.above }, { 1, true })
+end
+
+T["hint"]["is padded to the right edge of the text area"] = function()
+    start_session(
+        { "function test()", '    return "old"', "end" },
+        '<<<<<<< SEARCH\n    return "old"\n=======\n    return "new"\n>>>>>>> REPLACE'
+    )
+    local hint = hint_mark()
+    eq(hint.width, hint.text_width)
+
+    -- Resizing re-pads the hint
+    _G.child.o.columns = 160
+    _G.child.lua("vim.wait(100)")
+    local resized = hint_mark()
+    eq(resized.text_width > hint.text_width, true)
+    eq(resized.width, resized.text_width)
+end
+
 return T

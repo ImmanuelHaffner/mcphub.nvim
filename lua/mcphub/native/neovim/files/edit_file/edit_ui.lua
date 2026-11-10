@@ -776,6 +776,7 @@ function EditUI:_refresh_deletion_virt_lines()
     if vim.deep_equal(self.state.virt_line_geometry, geometry) then
         return
     end
+    self.state.virt_line_geometry = geometry
 
     for _, hunk_block in ipairs(self.state.hunk_blocks) do
         local extmark_id = hunk_block.del_extmark_id
@@ -789,6 +790,9 @@ function EditUI:_refresh_deletion_virt_lines()
             end
         end
     end
+
+    -- The hint is padded to the window width
+    self:_update_hints()
 end
 
 --- Calculate proper placement for virtual lines handling file boundaries
@@ -1346,26 +1350,58 @@ function EditUI:_update_hints()
     local confidence = current_hunk.confidence or 0
     local current_index = self.state.current_hunk_index or 1
     local index = string.format("%d/%d", current_index, #self.state.hunk_blocks)
+    local chunks = self:_create_hint_line(confidence, index)
 
-    -- Get position from hunk validation for accurate placement
-    local validation = self:_validate_hunk_block(current_hunk)
-    local start_line = math.max(0, validation.start_row)
-
-    -- If at start of buffer, place hint at a visible location
-    if start_line == 0 then
-        start_line = math.max(1, validation.end_row or 1)
+    -- Virtual lines cannot be right-aligned, so pad the hint up to the right edge of the text area
+    local width = 0
+    for _, chunk in ipairs(chunks) do
+        width = width + vim.api.nvim_strwidth(chunk[1])
     end
-    local file_line_count = vim.api.nvim_buf_line_count(self.state.bufnr)
-    -- -- At end of file
-    if start_line >= file_line_count - 1 then
-        start_line = file_line_count
+    local room = self:_get_virt_line_geometry().width - width
+    if room > 0 then
+        table.insert(chunks, 1, { string.rep(" ", room) })
     end
 
-    vim.api.nvim_buf_set_extmark(self.state.bufnr, self.highlights.namespace_hints, start_line - 1, 0, {
-        virt_text = self:_create_hint_line(confidence, index),
-        virt_text_pos = "right_align",
+    local row, above = self:_hint_placement(current_hunk)
+    vim.api.nvim_buf_set_extmark(self.state.bufnr, self.highlights.namespace_hints, row, 0, {
+        virt_lines = { chunks },
+        virt_lines_above = above,
         priority = self.highlights.priority,
     })
+end
+
+--- Where the hint for `hunk_block` goes. It sits on a virtual line of its own so that it
+--- hides no buffer text, normally right before the hunk and its removed lines. Virtual
+--- lines above the first buffer line are never scrolled into view, and removed lines
+--- drawn below their anchor (at either end of the file) would end up between the hint
+--- and the hunk, so in those cases the hint follows the hunk instead.
+---@param hunk_block DiffHunk Hunk the hint describes
+---@return integer row 0-based row to anchor the hint at
+---@return boolean above Whether the hint goes above that row rather than below it
+function EditUI:_hint_placement(hunk_block)
+    local bufnr, ns = self.state.bufnr, self.highlights.namespace_diff
+    if hunk_block.del_extmark_id and hunk_block.virt_lines_above == false then
+        local mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, hunk_block.del_extmark_id, {})
+        if mark[1] then
+            -- Virtual lines below one row are drawn in creation order, and the hint is
+            -- recreated on every update, so it always lands after the removed lines.
+            return mark[1], false
+        end
+    end
+
+    local validation = self:_validate_hunk_block(hunk_block)
+    local start_row = math.max(0, validation.start_row)
+    if start_row > 0 then
+        return start_row - 1, false
+    end
+
+    -- The band's `end_row` is exclusive: the first row after the hunk
+    local line_count = vim.api.nvim_buf_line_count(bufnr)
+    local end_row = math.max(validation.end_row or 0, 1)
+    if end_row < line_count then
+        return end_row, true
+    end
+    return line_count - 1, false
 end
 
 -- Handle buffer save
