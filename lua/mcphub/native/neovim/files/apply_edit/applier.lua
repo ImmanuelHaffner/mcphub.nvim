@@ -148,6 +148,8 @@
 --- @field errors   integer  whole-file error count
 --- @field warnings integer  whole-file warning count
 
+local readback = require("mcphub.native.neovim.files.apply_edit.readback")
+
 local M = {}
 
 --------------------------------------------------------------------------------
@@ -457,6 +459,9 @@ function M.apply_plan(plan, opts, drive_file, on_done)
                 -- has to nil-check. A driver that doesn't collect still
                 -- reports `{ errors = 0, warnings = 0 }`.
                 diagnostic_counts = outcome.diagnostic_counts or { errors = 0, warnings = 0 },
+                -- The file as it is now, against what the model read; nil
+                -- when it cannot be read back. See `readback.lua`.
+                readback = readback.compare(path, rec.content),
             }
 
             if outcome.status == "precondition_failed" then

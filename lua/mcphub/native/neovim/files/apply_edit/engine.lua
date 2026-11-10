@@ -14,6 +14,12 @@ local schema = require("mcphub.native.neovim.files.apply_edit.schema")
 
 local M = {}
 
+-- Both failure paths below fail before any buffer is touched. Saying so spares
+-- the model a re-read it would otherwise do just to refresh its fingerprints.
+local NOTHING_APPLIED = "Nothing was applied, so every file without a stale_fingerprint failure is exactly "
+    .. "as you read it: fix the failed ops and resubmit with the same baseline_fingerprint, "
+    .. "without re-reading."
+
 --- Render a list of schema errors as `failed[]` entries in the canonical
 --- response shape. Each error becomes one entry with `reason = "schema_invalid"`
 --- and the structured field details promoted to top-level keys.
@@ -96,6 +102,7 @@ function M.apply(input, drive_file, on_complete)
         return on_complete({
             status = "failed",
             summary = schema.format_error_summary(parsed_or_errors),
+            note = NOTHING_APPLIED,
             applied = {},
             rejected = {},
             failed = errors_to_failed(parsed_or_errors),
@@ -115,6 +122,7 @@ function M.apply(input, drive_file, on_complete)
         return on_complete({
             status = "failed",
             summary = string.format("planning failed: %d issue(s)", #plan_fail.failures),
+            note = NOTHING_APPLIED,
             applied = {},
             rejected = {},
             failed = planner_failures_to_failed(plan_fail.failures),

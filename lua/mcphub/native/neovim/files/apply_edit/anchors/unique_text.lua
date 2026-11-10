@@ -155,8 +155,10 @@ function M.resolve(anchor, record)
             {
                 reason = schema.ERROR_REASONS.anchor_not_found,
                 anchor = anchor,
-                hint = "the text was not found in the file. "
-                    .. "Re-read with neovim__read_with_fingerprint, or use a shorter / more characteristic substring.",
+                -- The fingerprint matched, so the file is as the model read
+                -- it: the text is mistyped, not stale.
+                hint = "the text does not occur in the file as you read it. Compare it with your read "
+                    .. "(whitespace, quotes, a copied line-number prefix), or use a shorter, more characteristic substring.",
                 candidates = {},
                 total_matches = 0,
             }

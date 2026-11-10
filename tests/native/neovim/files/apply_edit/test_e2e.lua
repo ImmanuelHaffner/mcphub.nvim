@@ -482,3 +482,48 @@ describe("mcphub.native.neovim.files.apply_edit.engine.apply line-drift regressi
         cleanup_fixture(path, bufnr)
     end)
 end)
+
+--- After the review, each file's state is read back and compared with what
+--- the model read, so the tool can tell it which fingerprints still hold.
+describe("mcphub.native.neovim.files.apply_edit.engine.apply read-back", function()
+    local function replace_first(path, fp)
+        return {
+            ops = {
+                {
+                    kind = "replace_range",
+                    path = path,
+                    baseline_fingerprint = fp,
+                    anchor = { by = "line_range", start = 1, ["end"] = 1 },
+                    content = "ONE",
+                    indent = "preserve",
+                },
+            },
+        }
+    end
+
+    it("reports an edited file as changed, fingerprinting what is on disk", function()
+        local path, bufnr, fp = fixture_file({ "one", "two" })
+        local rb = await_apply(replace_first(path, fp)).files[1].readback
+        assert.is.equal(true, rb.changed)
+        assert.is.equal(fingerprint.compute("ONE\ntwo\n"), rb.fingerprint)
+        cleanup_fixture(path, bufnr)
+    end)
+
+    it("reports a fully rejected file as unchanged, keeping its fingerprint", function()
+        local path, bufnr, fp = fixture_file({ "one", "two" })
+        local rb = await_apply_with(replace_first(path, fp), drivers.reject_all).files[1].readback
+        assert.is.equal(false, rb.changed)
+        assert.is.equal(fp, rb.fingerprint)
+        cleanup_fixture(path, bufnr)
+    end)
+
+    it("notes that nothing was applied when planning fails", function()
+        local path, bufnr, fp = fixture_file({ "one", "two" })
+        local input = replace_first(path, fp)
+        input.ops[1].anchor = { by = "unique_text", text = "absent" }
+        local response = await_apply(input)
+        assert.is.equal("failed", response.status)
+        assert.is_truthy(response.note:find("Nothing was applied", 1, true))
+        cleanup_fixture(path, bufnr)
+    end)
+end)

@@ -329,9 +329,10 @@ describe("mcphub.native.neovim.files.apply_edit.anchors.unique_text", function()
             assert.is.equal(0, fail.total_matches)
         end)
 
-        it("hint points at neovim__read_with_fingerprint for re-reading", function()
+        it("hint blames the text rather than sending the model to re-read", function()
             local _, fail = unique_text.resolve(ut("nonexistent"), rec)
-            assert.is_truthy(fail.hint:find("neovim__read_with_fingerprint", 1, true))
+            assert.is_truthy(fail.hint:find("as you read it", 1, true))
+            assert.is_nil(fail.hint:find("neovim__read_with_fingerprint", 1, true))
         end)
     end)
 

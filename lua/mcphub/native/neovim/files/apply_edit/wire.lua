@@ -128,6 +128,12 @@ local function file_entry(f)
     if type(s) == "string" and not s:match("^All %d+ block%(s%) were successfully applied") then
         out.ui_summary = s
     end
+    -- A fingerprint only for a file the model has seen as it is now: one that
+    -- is still exactly as it read it. See `readback.lua`.
+    local rb = f.readback
+    if type(rb) == "table" and rb.changed == false then
+        out.fingerprint = rb.fingerprint
+    end
     if next(out) == nil then
         return nil
     end
@@ -141,6 +147,7 @@ function M.format(response)
     local out = {
         status = response.status,
         summary = response.summary,
+        note = response.note,
         applied = entries(response.applied),
         rejected = entries(response.rejected),
         failed = entries(response.failed),

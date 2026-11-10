@@ -438,6 +438,7 @@ What the LLM receives is the engine's response flattened by `wire.lua` at the MC
 ```
 
 Every list is omitted when empty.
+A failure that applied nothing (schema or planning) adds a `note` saying so: every file without a `stale_fingerprint` failure is exactly as the model read it, so it can fix the ops and resubmit with the same fingerprints.
 
 | `status`     | Meaning                                                            |
 | ------------ | ------------------------------------------------------------------ |
@@ -467,6 +468,7 @@ A file appears only when it has something to add to the entries:
 ```
 {
   file:              string,
+  fingerprint:       string?,     // only while the file is still exactly as the model read it
   status:            "cancelled" | "no_changes" | "precondition_failed"?,  // omitted when completed
   cancel_reason:     string?,
   ui_summary:        string?,     // only when the review rejected something
@@ -474,6 +476,10 @@ A file appears only when it has something to add to the entries:
   diagnostic_counts: { errors, warnings }?,  // whole-file, omitted when both are 0
 }
 ```
+
+After its review each file is read back from the buffer (`readback.lua`) and compared with the content the model's `baseline_fingerprint` pins.
+When nothing changed (every op on it failed or was rejected), `fingerprint` is that same value and the model may edit again without re-reading.
+A file that changed carries none: a fingerprint certifies that the model has seen the file, and handing out one for unseen content would bless stale line numbers on the next edit.
 
 `diagnostics` are the LSP diagnostics of every severity within 10 lines of an edited range, read after a per-LSP wait (300 ms for lua_ls, 5000 ms for metals, etc.) so the server has time to publish post-write findings.
 Each `Diagnostic`:

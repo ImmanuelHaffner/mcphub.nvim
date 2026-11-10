@@ -68,6 +68,23 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
             }, out.files)
         end)
 
+        it("offers a fingerprint only for a file still as the model read it", function()
+            local out = wire.format({
+                status = "partial",
+                note = "n",
+                files = {
+                    { path = HOME_FILE, status = "completed", readback = { fingerprint = "abc1234", changed = false } },
+                    {
+                        path = HOME_FILE .. "2",
+                        status = "completed",
+                        readback = { fingerprint = "def5678", changed = true },
+                    },
+                },
+            })
+            assert.is.equal("n", out.note)
+            assert.are.same({ { file = "~/proj/a.lua", fingerprint = "abc1234" } }, out.files)
+        end)
+
         it("flattens an anchor failure and drops the echoed anchor", function()
             local out = wire.format({
                 status = "failed",
