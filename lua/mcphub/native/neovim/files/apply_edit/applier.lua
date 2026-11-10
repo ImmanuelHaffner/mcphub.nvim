@@ -239,8 +239,10 @@ end
 --- applier and the `drive_file` callback. It contains no mcphub types.
 ---
 --- @param file_ops mcphub.edit.LocatedOp[]
+--- @param empty    boolean?  The file is empty (`FileRecord.empty`): every block is joined into one that
+---                           replaces the empty line its buffer reads as.
 --- @return mcphub.edit.applier.Block[]
-local function build_blocks(file_ops)
+local function build_blocks(file_ops, empty)
     local blocks = {}
     for _, lop in ipairs(file_ops) do
         for range_idx, range in each_range(lop) do
@@ -253,6 +255,9 @@ local function build_blocks(file_ops)
                 replace_lines = replace_lines,
             }
         end
+    end
+    if empty then
+        return { blocks_mod.into_empty(blocks) }
     end
     return blocks_mod.merge_touching(blocks)
 end
@@ -433,7 +438,7 @@ function M.apply_plan(plan, opts, drive_file, on_done)
         local rec = plan.records[path]
         assert(rec, "apply_plan: missing FileRecord for path " .. tostring(path))
 
-        local blocks = build_blocks(by_path[path])
+        local blocks = build_blocks(by_path[path], rec.empty)
         local request = {
             file_path = path,
             bufnr = rec.bufnr,

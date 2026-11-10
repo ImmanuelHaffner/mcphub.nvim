@@ -58,6 +58,8 @@ local buffer = require("mcphub.native.neovim.utils.buffer")
 --- @field n_lines   integer                Number of lines in `content`. Derived from `#offsets`.
 --- @field bufnr     integer                Buffer number the content was sourced from.
 --- @field endofline boolean                Captured `vim.bo[bufnr].endofline` at read time.
+--- @field empty     boolean                The file is empty. Read from a buffer, which always holds a line, its
+---                                         `content` is still `"\n"`, exactly like a file holding `"\n"`.
 
 --- Build the line-start offsets array for a string.
 ---
@@ -129,6 +131,11 @@ function M.from_buffer(bufnr)
         n_lines = #offsets,
         bufnr = bufnr,
         endofline = endofline,
+        -- Only `line2byte` tells an empty buffer from one holding an empty line;
+        -- `nvim_buf_get_offset` and the lines themselves are the same for both.
+        empty = vim.api.nvim_buf_call(bufnr, function()
+            return vim.fn.line2byte(vim.fn.line("$") + 1) == -1
+        end),
     }
 end
 
@@ -153,7 +160,8 @@ end
 ---
 --- @param path string
 --- @return mcphub.edit.FileRecord|nil record  On success.
---- @return string|nil err                  On failure, the I/O error message.
+--- @return string|nil err                  On failure, the I/O error message. It names no path:
+---                                         callers report it next to the path they asked for.
 function M.read(path)
     if type(path) ~= "string" or path == "" then
         return nil, "path must be a non-empty string"
@@ -164,17 +172,17 @@ function M.read(path)
     -- nonexistent path silently succeeds — we don't want that.
     local stat = vim.uv.fs_stat(abs_path)
     if not stat then
-        return nil, string.format("cannot open %q: file does not exist", abs_path)
+        return nil, "cannot open: file does not exist"
     end
     if stat.type ~= "file" and stat.type ~= "link" then
-        return nil, string.format("cannot open %q: not a regular file (type=%s)", abs_path, stat.type)
+        return nil, string.format("cannot open: not a regular file (type=%s)", stat.type)
     end
 
     -- bufadd is idempotent: returns the existing bufnr if a buffer with that
     -- name is already in the list, otherwise creates a fresh unloaded one.
     local bufnr = vim.fn.bufadd(abs_path)
     if bufnr == 0 then
-        return nil, string.format("cannot open %q: bufadd failed", abs_path)
+        return nil, "cannot open: bufadd failed"
     end
     if not vim.api.nvim_buf_is_loaded(bufnr) then
         -- bufload reads the file through Neovim's normal load pipeline:
@@ -183,7 +191,7 @@ function M.read(path)
         -- rather than exceptions; we trust the resulting buffer state.
         local ok, err = pcall(vim.fn.bufload, bufnr)
         if not ok then
-            return nil, string.format("cannot load %q: %s", abs_path, tostring(err))
+            return nil, "cannot load: " .. tostring(err)
         end
     end
 
@@ -208,6 +216,7 @@ function M.from_content(path, content)
         n_lines = #offsets,
         bufnr = -1,
         endofline = true,
+        empty = content == "",
     }
 end
 

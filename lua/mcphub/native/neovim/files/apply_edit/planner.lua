@@ -199,7 +199,7 @@ local function read_files(ops)
                 op_index = op_index,
                 path = raw,
                 reason = schema.ERROR_REASONS.io_error,
-                message = string.format("file %q could not be loaded (see earlier op)", raw),
+                message = "the file could not be loaded (see the earlier op on it)",
                 hint = "this op shares its target path with an earlier failed op; fix that one first.",
             }
         end

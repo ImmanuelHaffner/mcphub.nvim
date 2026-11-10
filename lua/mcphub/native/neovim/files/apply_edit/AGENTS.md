@@ -24,34 +24,38 @@ files:
 
 ```
 apply_edit/*.lua          ← pure engine: engine, schema, planner,
-                            applier, read, file_record, fingerprint,
-                            indent, json, anchors/*. No mcphub, no
-                            MCP, no UI — they import only from
-                            apply_edit/* and from vim.*.
+                            applier, blocks, readback, wire, read,
+                            file_record, fingerprint, indent, json,
+                            anchors/*. No mcphub, no MCP, no UI —
+                            they import only from apply_edit/*,
+                            mcphub.native.neovim.utils and vim.*.
 
 apply_edit/init.lua       ← the MCP tool surface: the two tools' JSON
                             schemas, descriptions and handlers, which
                             files/init.lua registers. Reaches into
-                            mcphub only for State, to read this tool's
-                            user config.
+                            mcphub for State, to read this tool's
+                            user config, and for edit_file's
+                            focus_gate, to tie reviews to the chat.
 
-apply_edit/ui_backend.lua ← the mcphub bridge. The only file here that
-                            reaches outside this directory, and it does
-                            so exactly once, for EditUI.
+apply_edit/ui_backend.lua ← the mcphub bridge. The only engine-side
+                            consumer of edit_file, for EditUI.
 ```
 
 The boundary is **grep-enforceable**: every `require` in this directory
-resolves inside `apply_edit/*` except two.
+resolves inside `apply_edit/*` except five.
 
 ```
 rg 'require\("mcphub' lua/mcphub/native/neovim/files/apply_edit/ -g '*.lua' \
   | rg -v 'apply_edit\.' \
   | rg -v -- '---'   # drop the docstring/README setup() examples
-# MUST match exactly two: ui_backend.lua's EditUI, init.lua's mcphub.state
+# MUST match exactly five: utils.buffer in file_record.lua and ui_backend.lua,
+# EditUI in ui_backend.lua, mcphub.state and focus_gate in init.lua
 ```
 
-Note the shape of `init.lua`'s single mcphub import: it requires
-`mcphub.state` *only* to read `State.config.builtin_tools.apply_edit`
+`utils.buffer` is a leaf helper (buffer-first content and hashing, shared
+with `edit_file` so both agree on a staleness check), not mcphub state.
+Note the shape of `init.lua`'s `mcphub.state` import: it is required
+*only* to read `State.config.builtin_tools.apply_edit`
 and pass it to the driver. It never hands configuration to
 `edit.apply`, because the engine's opts-free seal (see *Single
 LLM-facing entry point*) has to hold. See *Configuration* below.
@@ -73,7 +77,8 @@ editing anything in `applier.lua`, `anchors/*.lua`, or `ui_backend.lua`.
 
 | Quantity                          | Convention                                           |
 | --------------------------------- | ---------------------------------------------------- |
-| `op_index` (Lua and wire)         | 1-based **everywhere** in the response: matches the position of the op in the input `ops[]` array, counting from 1. The internal `parsed_ops[op_index]` table-lookup is therefore direct, no translation. |
+| `op_index` in the engine          | 1-based: the position of the op in the input `ops[]` array, counting from 1, so `parsed_ops[op_index]` is a direct lookup. |
+| `op` on the wire                  | 0-based: `wire.lua` turns `op_index` into `op` (and `conflict_op_index` / `conflicting_op_indices` into `conflict_op` / `conflict_ops`), subtracting 1 to match the index the model wrote. |
 | JSON-Pointer-style `path` strings inside `schema_invalid` errors | 0-based. `"ops[0].anchor.text"` refers to the first op. Matches RFC 6901. Built in `validate_op` as `string.format('ops[%d]', op_index - 1)`. |
 | Line ranges in the engine         | 1-based inclusive everywhere.                        |
 | Line ranges at `nvim_buf_set_lines` boundary | 0-based, end-exclusive. `start_0 = start_line - 1; end_excl = end_line`. |
@@ -83,12 +88,11 @@ editing anything in `applier.lua`, `anchors/*.lua`, or `ui_backend.lua`.
 | Severity in `vim.diagnostic`      | Integer enum (`ERROR=1, WARN=2, INFO=3, HINT=4`).    |
 | Severity in the response          | Lowercase string. `SEVERITY_NAME` table in `ui_backend.lua`. |
 
-The historical motivation for "JSON is 0-based" was the JSON Pointer
-spec. We bend that here: `op_index` as a structured field is much more
-useful to LLMs as a 1-based position (matches how they count
-naturally) than as a 0-based offset. The 0-based form is preserved
-only inside the JSON Pointer path strings, which the LLM reads as
-location hints rather than indexing into.
+The response used to carry `op_index` 1-based on the theory that
+models count from 1. They index the `ops` array they wrote, though,
+which is 0-based like the JSON Pointer paths in `schema_invalid`
+errors, so the wire now agrees with both. Specs on the engine response
+still see 1-based `op_index`; only `test_wire.lua` sees `op`.
 
 The zero-width-position convention (`{N, N-1}`) is deliberate. It encodes
 "insert before line N" as a regular range that:
@@ -216,9 +220,9 @@ One active schema-layer check plus one temporarily-disabled one:
   line `foo` but not the `foo` in `foobar`) and resolves to the correct
   range. Checked in `validate_base_anchor`'s `unique_text` branch.
 
-The asymmetry is why these are two distinct reasons, not one: `content`
-rejects both boundaries (it is pure output), `unique_text` rejects only
-the leading one (a trailing newline is useful there).
+The asymmetry is why these were two distinct reasons, not one: a
+boundary `\n` in `content` is now honoured as a blank line, while a
+leading one in `unique_text` would silently move the edit.
 
 ### Baseline fingerprint is mandatory
 
@@ -335,7 +339,10 @@ the same way every time.
 `M.compute(content) → "abc1234"`. Stateless.
 
 **`read.lua`** — engine behind `neovim__read_with_fingerprint`. Loads
-a file into a buffer, normalises content, computes fingerprint.
+a file into a buffer, normalises content, computes fingerprint, and
+`render`s a success as a plain-text header plus `cat -n`-numbered
+lines (failures stay JSON). `number_lines` also numbers `wire.lua`'s
+excerpts and the dry-run previews.
 
 **`json.lua`** — UTF-8-safe JSON encoding for tool responses.
 `M.scrub_string(s) → (clean, n)` scrubs one string to well-formed
@@ -355,16 +362,30 @@ caller-supplied `drive_file`, classifies per-block outcomes into
 applier) so no driver sees two blocks whose application order matters; a
 joined block lists the blocks it absorbed in `members`, and its single
 status is reported for each. `join` also bridges a gap with the original
-lines, which `ui_backend` uses for widening collisions.
+lines, which `ui_backend` uses for widening collisions; `into_empty`
+turns every block of an empty file into one replacing its phantom line.
+
+**`readback.lua`** — after a file's review, compares the buffer with the
+content the model's fingerprint pinned and returns the new fingerprint,
+the changed regions and their excerpts (withheld past 100 lines). A
+fingerprint is only handed out with content showing the file as it is
+now, because a bare one would bless stale line numbers.
+
+**`wire.lua`** — reshapes the engine response for the model at the MCP
+boundary only: 0-based `op`, `file` (home-relative) or `field` instead
+of `path`, `lines` strings instead of ranges, empty lists and
+`ui_summary` dropped. Everything upstream, drivers and most specs
+included, sees the engine's own shape.
 
 ### The mcphub-facing files
 
 **`init.lua`** — the tool surface. Returns an `MCPTool[]` array declaring
 `neovim__apply_edit` and `neovim__read_with_fingerprint` — JSON schemas,
 descriptions and handlers — for `files/init.lua` to register; it never
-calls `add_tool` itself. Calls `engine.apply` for apply and
-`read.read_with_fingerprint` for read, scrubbing both responses through
-`json.safe_encode`.
+calls `add_tool` itself. Calls `engine.apply` for apply, formatting the
+response through `wire.format`, and `read.read_with_fingerprint` for
+read, rendering it through `read.render`; both scrub to well-formed
+UTF-8 with `json.scrub` first.
 
 **`ui_backend.lua`** — the `drive_file` implementation backed by
 `edit_file`'s `EditUI`. Contains:
@@ -539,8 +560,8 @@ WTF-8 / CESU-8 (`0xED 0xA0..0xBF 0x80..0xBF`) — lands in the JSON
 string unescaped. It does NOT raise on this, so a `pcall` guard around
 it catches nothing.
 
-Our responses echo file content back (anchor candidates, context
-snippets, rejected-hunk previews, error `message`/`hint`). If the
+Our responses echo file content back (reads, anchor candidates,
+excerpts, dry-run previews, error `message`/`hint`). If the
 edited file contains such bytes, they flow into the tool result. The
 failure is DEFERRED and brutal: the poisoned string is stored in the
 CodeCompanion chat history, and the *next* HTTP submit — not the edit
@@ -551,12 +572,22 @@ chat" even though apply_edit returned fine.
 
 The fix lives in this directory's `json.lua`: both handlers in
 `init.lua` scrub the response to well-formed UTF-8 (bad bytes →
-U+FFFD) before encoding, and surface a
-`content_encoding_lossy` warning to the LLM when any byte was replaced
-(via `warnings[]` on apply_edit, `encoding_warning` on
-read_with_fingerprint). Do NOT go back to a bare
-`pcall(vim.json.encode, response)` at either handler — that reopens
-this bug. Covered by `test_json.lua`.
+U+FFFD) before encoding or rendering it, and tell the LLM when any byte
+was replaced (a `content_encoding_lossy` entry in `warnings[]` on
+apply_edit, a `warning:` header line on read_with_fingerprint). Do NOT
+go back to a bare `pcall(vim.json.encode, response)` at either
+handler — that reopens this bug. Covered by `test_json.lua`.
+
+### An empty file reads as one empty line
+
+A buffer always has a line, so a 0-byte file and a file holding `"\n"`
+both read as `"\n"`, with the same fingerprint; only
+`line2byte(line('$') + 1) == -1` tells them apart, and `file_record`
+records it as `empty`. The model sees `lines: 1-1 of 1` (plus a header
+note) and anchors on that line, but it is not in the file: an insert
+before or after it used to keep it, leaving a stray blank line. So the
+applier joins every block of an empty file into one replacing line 1
+(`blocks.into_empty`).
 
 ## Configuration
 

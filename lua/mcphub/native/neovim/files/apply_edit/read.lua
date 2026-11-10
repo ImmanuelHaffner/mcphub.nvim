@@ -239,7 +239,7 @@ function M.read_with_fingerprint(path, opts)
 
     local rec, err = file_record.read(path)
     if not rec then
-        return failure(string.format("cannot read %q", path), {
+        return failure("cannot read the file", {
             reason = schema.ERROR_REASONS.io_error,
             path = path,
             message = err or "file_record.read returned nil with no error",
@@ -309,6 +309,7 @@ function M.read_with_fingerprint(path, opts)
         end_line = effective_end,
         returned_lines = effective_end - effective_start + 1,
         total_lines = total_lines,
+        empty = rec.empty,
     }
 end
 
@@ -350,6 +351,9 @@ function M.render(r, warning)
     }
     if not eol then
         header[#header + 1] = "note: the file does not end with a newline"
+    end
+    if r.empty then
+        header[#header + 1] = "note: the file is empty; line 1 stands in for it, and any edit replaces it"
     end
     if warning then
         header[#header + 1] = "warning: " .. warning

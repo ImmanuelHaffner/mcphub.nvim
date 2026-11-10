@@ -151,12 +151,8 @@ local function file_entry(f)
     if type(counts) == "table" and ((counts.errors or 0) > 0 or (counts.warnings or 0) > 0) then
         out.diagnostic_counts = counts
     end
-    -- EditUI's summary restates the block tally unless the review rejected
-    -- something, where it carries the per-block breakdown.
-    local s = f.ui_summary
-    if type(s) == "string" and not s:match("^All %d+ block%(s%) were successfully applied") then
-        out.ui_summary = s
-    end
+    -- `ui_summary` is left out: EditUI's text restates `rejected[]` in its own
+    -- terms (1-based block ids, an absolute path, the lines the model sent).
     -- A fingerprint only for a file the model has seen as it is now: one still
     -- exactly as it read it, or one whose every change is shown here. See
     -- `readback.lua`.

@@ -67,7 +67,7 @@ end
 --- `lines` (the buffer's lines, 1-based); without `lines` the blocks must touch.
 --- Blocks that are themselves joined are flattened into their members.
 ---
---- @param list  mcphub.edit.applier.Block[]  At least two, in batch order.
+--- @param list  mcphub.edit.applier.Block[]  In batch order.
 --- @param lines string[]?
 --- @return mcphub.edit.applier.Block
 function M.join(list, lines)
@@ -111,6 +111,21 @@ function M.join(list, lines)
         replace_lines = replace,
         members = flat,
     }
+end
+
+--- Join every block of a file that is empty on disk into one replacing line 1.
+---
+--- An empty buffer still holds one empty line, which a read shows and an anchor
+--- can name, but which is not in the file: kept, it would add a blank line to
+--- every insertion. So the joined block replaces it, whichever seam each
+--- insertion named.
+---
+--- @param list mcphub.edit.applier.Block[]  In batch order.
+--- @return mcphub.edit.applier.Block
+function M.into_empty(list)
+    local block = M.join(list, {}) -- the only line between blocks is that empty one
+    block.range = { start_line = 1, end_line = 1 }
+    return block
 end
 
 --- Join every run of touching blocks. Blocks that touch nothing come back as

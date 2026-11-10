@@ -393,6 +393,22 @@ describe("apply_plan with synthetic drivers", function()
 
             cleanup_fixture(path, bufnr)
         end)
+
+        it("replaces the line an empty file reads as, whichever seam an insert names", function()
+            local path, bufnr, fp = fixture_file({}, "_empty.txt")
+            local response = run({
+                ops = {
+                    op("insert", path, fp, { by = "after", of = lr(1, 1) }, "B"),
+                    op("insert", path, fp, { by = "before", of = lr(1, 1) }, "A"),
+                },
+            }, drivers.accept_all)
+
+            assert.is.equal("applied", response.status)
+            assert.is.equal(2, #response.applied)
+            assert.are.same({ "A", "B" }, vim.fn.readfile(path))
+
+            cleanup_fixture(path, bufnr)
+        end)
     end)
 
     describe("cancel_at (mid-batch cancel)", function()

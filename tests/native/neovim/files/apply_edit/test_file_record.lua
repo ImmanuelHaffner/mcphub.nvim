@@ -225,6 +225,17 @@ describe("mcphub.native.neovim.files.apply_edit.file_record", function()
             cleanup(tmp)
         end)
 
+        it("tells an empty file from one holding an empty line", function()
+            local empty, newline = write_tempfile(""), write_tempfile("\n")
+            local a, b = assert(fr.read(empty)), assert(fr.read(newline))
+            -- Both buffers hold one empty line, so the content cannot tell them apart.
+            assert.is.equal(a.content, b.content)
+            assert.is_true(a.empty)
+            assert.is_false(b.empty)
+            cleanup(empty)
+            cleanup(newline)
+        end)
+
         it("returns nil + error when the file does not exist", function()
             local rec, err = fr.read("/nonexistent/path/that/should/not/exist")
             assert.is_nil(rec)

@@ -68,7 +68,7 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
             }, out)
         end)
 
-        it("keeps per-file diagnostics and a review breakdown", function()
+        it("keeps per-file diagnostics and drops the review UI's summary", function()
             local diag = { severity = "error", line = 3, end_line = 3, col = 1, end_col = 2, message = "boom" }
             local out = wire.format({
                 status = "partial",
@@ -87,7 +87,6 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
                     file = "~/proj/a.lua",
                     diagnostics = { diag },
                     diagnostic_counts = { errors = 1, warnings = 0 },
-                    ui_summary = "1 of 2 block(s) were applied",
                 },
             }, out.files)
         end)

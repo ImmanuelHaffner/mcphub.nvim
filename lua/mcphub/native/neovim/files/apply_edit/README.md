@@ -483,7 +483,6 @@ A file appears whenever it could be read back, which is nearly always:
   note:              string?,     // when it changed too much to show
   status:            "cancelled" | "no_changes" | "precondition_failed"?,  // omitted when completed
   cancel_reason:     string?,
-  ui_summary:        string?,     // only when the review rejected something
   diagnostics:       [ Diagnostic, ... ]?,
   diagnostic_counts: { errors, warnings }?,  // whole-file, omitted when both are 0
 }

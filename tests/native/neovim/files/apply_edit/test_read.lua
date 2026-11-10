@@ -436,4 +436,13 @@ describe("mcphub.native.neovim.files.apply_edit.read.render", function()
         assert.is_truthy(out:find("\nnote: the file does not end with a newline\nwarning: lossy\n\n1\ta\n2\tb$"))
         cleanup(tmp)
     end)
+
+    it("notes an empty file, whose line 1 is not in it", function()
+        local empty, newline = write_tempfile(""), write_tempfile("\n")
+        local note = "note: the file is empty"
+        assert.is_truthy(edit_read.render(edit_read.read_with_fingerprint(empty)):find(note, 1, true))
+        assert.is_nil(edit_read.render(edit_read.read_with_fingerprint(newline)):find(note, 1, true))
+        cleanup(empty)
+        cleanup(newline)
+    end)
 end)
