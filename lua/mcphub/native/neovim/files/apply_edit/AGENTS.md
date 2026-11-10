@@ -375,20 +375,24 @@ lines found verbatim at its expected position is marked `omitted`, and
 `wire.lua` renders it as one unnumbered `⋮` line.
 
 **`wire.lua`** — reshapes the engine response for the model at the MCP
-boundary only: 0-based `op`, `file` (home-relative) or `field` instead
-of `path`, `lines` strings instead of ranges, empty lists and
-`ui_summary` dropped. Everything upstream, drivers and most specs
-included, sees the engine's own shape.
+boundary only. `format` flattens it into a table: 0-based `op`, `file`
+(home-relative) or `field` instead of `path`, `lines` strings instead of
+ranges, empty lists and `ui_summary` dropped. `render` turns that table
+into the plain text the model receives: a status line, request-level
+problems, then one section per file with its fingerprint, op lines,
+`changes:`, diagnostics and excerpts. Only numbered lines are file text.
+Everything upstream, drivers and most specs included, sees the engine's
+own shape; `test_wire.lua` covers both stages.
 
 ### The mcphub-facing files
 
 **`init.lua`** — the tool surface. Returns an `MCPTool[]` array declaring
 `neovim__apply_edit` and `neovim__read_with_fingerprint` — JSON schemas,
 descriptions and handlers — for `files/init.lua` to register; it never
-calls `add_tool` itself. Calls `engine.apply` for apply, formatting the
-response through `wire.format`, and `read.read_with_fingerprint` for
-read, rendering it through `read.render`; both scrub to well-formed
-UTF-8 with `json.scrub` first.
+calls `add_tool` itself. Calls `engine.apply` for apply, turning the
+response into text through `wire.format` and `wire.render`, and
+`read.read_with_fingerprint` for read, rendering it through
+`read.render`; both scrub to well-formed UTF-8 with `json.scrub` first.
 
 **`ui_backend.lua`** — the `drive_file` implementation backed by
 `edit_file`'s `EditUI`. Contains:
@@ -537,7 +541,7 @@ insert one line above a delete-to-EOF borrows the same line), so
 
 A joined block is reviewed as one EditUI block, so its ops share one
 status: rejecting any hunk of it reports every absorbed op as
-`partially_rejected`. The `files[]` read-back shows what actually landed.
+`partially_rejected`. The file's read-back shows what actually landed.
 
 ### Diagnostic wait is per-LSP, not flat
 
@@ -576,7 +580,7 @@ chat" even though apply_edit returned fine.
 The fix lives in this directory's `json.lua`: both handlers in
 `init.lua` scrub the response to well-formed UTF-8 (bad bytes →
 U+FFFD) before encoding or rendering it, and tell the LLM when any byte
-was replaced (a `content_encoding_lossy` entry in `warnings[]` on
+was replaced (a `content_encoding_lossy` warning line on
 apply_edit, a `warning:` header line on read_with_fingerprint). Do NOT
 go back to a bare `pcall(vim.json.encode, response)` at either
 handler — that reopens this bug. Covered by `test_json.lua`.

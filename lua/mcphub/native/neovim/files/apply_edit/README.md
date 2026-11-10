@@ -96,14 +96,19 @@ On failure (file missing, unreadable, etc.) you get:
 }
 ```
 
-Successful apply returns
+A successful apply returns plain text too: a status line, then a section per file with its new fingerprint, the outcome of each op, and the changed lines as they are now (see [The response](#the-response)):
 
-```json
-{
-  "status":  "applied",
-  "summary": "applied 1, rejected 0, failed 0 across 1 file(s)",
-  "applied": [ { "op": 0, "kind": "replace_range", "file": "~/...", "lines": "2" } ]
-}
+```
+applied: 1 op in 1 file
+
+/tmp/example.txt
+fingerprint: 9f8e7d6
+applied: op 0 replace_range 2
+changes: 2 → 2
+
+1	line 1
+2	the new line 2
+3	line 3
 ```
 
 **Lua callers** pass a Lua table with the same shape:
@@ -425,104 +430,104 @@ buffers take precedence over their on-disk file at every read and apply.
 
 ## The response
 
-What the LLM receives is the engine's response flattened by `wire.lua` at the MCP boundary; Lua callers of `engine.apply` get the unflattened shape documented in `applier.lua`.
+What the LLM receives is plain text, rendered by `wire.lua` at the MCP boundary from the engine's response: `wire.format` flattens it into a table, `wire.render` turns that into text.
+Lua callers of `engine.apply` get the unflattened shape documented in `applier.lua`.
+
+Text rather than JSON for the reason `neovim__read_with_fingerprint` gives: excerpts, candidates and previews are file text the model builds its next anchors from, and inside a JSON string every line break, tab and quote in them is escaped.
 
 ```
-{
-  status:   "applied" | "partial" | "failed" | "cancelled" | "dry_run",
-  summary:  string,
-  note:     string?,
-  planned:  [ Entry, ... ]?,   // dry runs only
-  applied:  [ Entry, ... ]?,
-  rejected: [ Entry, ... ]?,
-  failed:   [ Entry, ... ]?,
-  files:    [ FileEntry, ... ]?,
-  warnings: [ Entry, ... ]?,
-}
+applied: 2 ops in 1 file
+
+~/proj/applier.lua
+fingerprint: 2228772
+applied: op 0 insert before 313, op 1 replace_range 477
+changes: before 313 → 313-338, 477 → 503
+diagnostics: 0 errors, 1 warning in the file
+near the edits:
+  320:5 warn: unused local (lua_ls unused-local)
+
+311	end
+312	
+313	--- The blocks whose lines went into the file, in position order, up to the
+314	--- first one only partly accepted: past it, where lines sit is unknown.
+  ⋮	315–336: 22 lines as you sent them
+337	end
+338	
+
+501	                -- The file as it is now, against what the model read; nil
+502	                -- when it cannot be read back. See `readback.lua`.
+503	                readback = readback.compare(path, rec.content, landed_blocks(blocks, outcome)),
+504	            }
+505	
 ```
 
-Every list is omitted when empty.
+The first line is the status and the count of distinct ops in each non-empty list (just `N ops` when there is one), then the number of files.
+Next come a `note:` when nothing was applied, and whatever concerns the request as a whole: schema failures and warnings.
+Then there is one section per file, separated by blank lines and headed by its home-relative path.
+Only numbered lines are file content, so unnumbered ones, blank lines included, can separate and annotate them without ambiguity.
+
+| Status      | Meaning                                                            |
+| ----------- | ------------------------------------------------------------------ |
+| `applied`   | Every op applied successfully.                                     |
+| `partial`   | Some ops applied, some rejected or failed.                         |
+| `failed`    | No ops applied; one or more failed.                                |
+| `cancelled` | User cancelled the review session and no ops landed.               |
+| `dry_run`   | `dry_run: true` and every op resolved; nothing was applied.        |
+
 A failure that applied nothing (schema or planning) adds a `note` saying so: every file without a `stale_fingerprint` failure is exactly as the model read it, so it can fix the ops and resubmit with the same fingerprints.
 
-| `status`     | Meaning                                                            |
-| ------------ | ------------------------------------------------------------------ |
-| `"applied"`  | Every op applied successfully.                                     |
-| `"partial"`  | Some ops applied, some rejected or failed.                         |
-| `"failed"`   | No ops applied; one or more failed.                                |
-| `"cancelled"`| User cancelled the review session and no ops landed.               |
-| `"dry_run"`  | `dry_run: true` and every op resolved; nothing was applied.        |
-
-A dry run that resolves returns `planned[]` instead of applying: one entry per op (per range, for `occurrence: "all"`) with its `lines` and a numbered `preview` of the lines that frame it — all of a range of up to three lines, the first and last line of a longer one, the two neighbours of an insertion seam — because that is where an off-by-one shows.
+A dry run that resolves gives each op (each range, for `occurrence: "all"`) a `planned:` line followed by the numbered lines that frame it — all of a range of up to three lines, the first and last line of a longer one, the two neighbours of an insertion seam, with `...` for the gap — because that is where an off-by-one shows.
 A dry run that does not resolve fails exactly like a real call.
 Deleting every line of a file, which the EditUI driver cannot express, is not visible to a dry run and still fails at apply time.
 
-### Entries
+### Ops and failures
+
+An op is named `op N`, the **0-based** index into the request's `ops`, the same number a schema error's field (`ops[0].anchor`) uses; request-level errors have none.
+Its location is the resolved range in the file as the LLM read it: `12`, `12-14`, or `before 12` for an insertion position.
+
+`applied:` and `rejected:` list a file's ops on one line each, a rejection followed by its reason: `rejected` (the user rejected the op's hunks), `partially_rejected` (some hunks accepted, some not) or `cancelled` (the review closed before deciding).
+
+Each failure is a `failed:` line naming the op, a `reason` from [Errors and recovery](#errors-and-recovery), its location in parentheses or the request field after `in`, and its `message` (or its `hint` when there is none).
+The remaining details follow, one indented `key: value` line each, the hint first: `total_matches` for `anchor_ambiguous`, `conflict_op` / `conflict_lines` / `conflict_ops` for `range_conflict`, `expected` / `got` for schema errors.
+An `anchor_ambiguous` failure ends with its candidates, numbered like a read with each match's first line cut at 120 bytes:
 
 ```
-{ op: int?, file: string?, field: string?, kind: string?, lines: string?, reason: string?, ... }
+failed: 1 op in 1 file
+note: Nothing was applied, so every file without a stale_fingerprint failure is exactly as you read it: …
+
+~/proj/a.lua
+failed: op 1 anchor_ambiguous: 3 occurrences found. Either make `text` more specific …
+  total_matches: 3
+ 42	    local out = {}
+ 97	    local out = {}
+143	    local out = {}
 ```
 
-`op` is the **0-based** index into the request's `ops`, the same number a schema error's `field` (`ops[0].anchor`) uses; request-level errors have none.
-`file` is the path, home-relative.
-`lines` is the resolved location in the file as the LLM read it: `"12"`, `"12-14"`, or `"before 12"` for an insertion position.
-
-`rejected[]` entries carry `reason`: `rejected` (the user rejected the op's hunks), `partially_rejected` (some hunks accepted, some not) or `cancelled` (the review closed before deciding).
-`failed[]` entries carry a `reason` from [Errors and recovery](#errors-and-recovery), a `message`, a `hint`, and reason-specific fields: `candidates` (`{ lines, text }`, the matched line's text cut at 120 bytes) and `total_matches` for `anchor_ambiguous`, `conflict_op` / `conflict_lines` / `conflict_ops` for `range_conflict`.
+Warnings are non-fatal issues — unused `contents` labels, `indent: detect` fallbacks, `ops` or `contents` sent as a string holding their JSON (decoded and used, reason `stringified_field`), etc. — shown as `warning:` lines in the same form; the batch still applies.
 The request's own `anchor` and `baseline_fingerprint` are not echoed back.
 
-### `files[]`
+### Files
 
-A file appears whenever it could be read back, which is nearly always:
-
-```
-{
-  file:              string,
-  fingerprint:       string?,     // the file now; absent only when it changed too much to show
-  changes:           [ { was: string, now: string } ]?,  // when changed: lines as read -> lines now
-  excerpts:          [ string ]?, // when changed: the changed regions now, numbered, 2 lines of context
-  note:              string?,     // when it changed too much to show
-  status:            "cancelled" | "no_changes" | "precondition_failed"?,  // omitted when completed
-  cancel_reason:     string?,
-  diagnostics:       [ Diagnostic, ... ]?,
-  diagnostic_counts: { errors, warnings }?,  // whole-file, omitted when both are 0
-}
-```
+A file's section shows, in order: `fingerprint:` (with `(unchanged)` when it is exactly as read) or a `note:` that it changed too much to show, `status:` with its reason when its review did not complete, the op lines, `changes:` (`was → now` per changed region), the diagnostics, and finally its excerpts.
 
 After its review each file is read back from the buffer (`readback.lua`) and diffed against the content the model's `baseline_fingerprint` pins, so format-on-save and concurrent user edits show up too.
-When nothing changed (every op on it failed or was rejected), `fingerprint` is that same value.
-When it changed, the fingerprint comes with `changes` and `excerpts`: together with the model's earlier read they determine the file as it is now, so the model may edit again without re-reading, renumbering by `changes`.
+When nothing changed (every op on it failed or was rejected), the fingerprint is that same value.
+When it changed, the fingerprint comes with `changes` and excerpts of every changed region with 2 lines of context: together with the model's earlier read they determine the file as it is now, so the model may edit again without re-reading, renumbering by `changes`.
 Lines the model sent need not be shown back: where a block's lines are found in the file exactly as sent, at the position the earlier blocks' line counts put them, a run of 8 or more keeps its first and last 2 lines and the middle becomes one unnumbered line, `  ⋮	43–50: 8 lines as you sent them`.
 A formatter or the user changing any line of the run puts all of it back on show, since the model has not seen that text.
-A fingerprint certifies that the model has seen the file, so when the excerpts would exceed 100 lines (an omitted run counting as one) both are withheld and `note` asks for a re-read; handing out a fingerprint for unseen content would bless stale line numbers on the next edit.
+A fingerprint certifies that the model has seen the file, so when the excerpts would exceed 100 lines (an omitted run counting as one) both are withheld and a `note` asks for a re-read; handing out a fingerprint for unseen content would bless stale line numbers on the next edit.
 
-`diagnostics` are the LSP diagnostics of every severity within 10 lines of an edited range, read after a per-LSP wait (300 ms for lua_ls, 5000 ms for metals, etc.) so the server has time to publish post-write findings.
-Each `Diagnostic`:
-
-```
-{
-  severity: "error" | "warn" | "info" | "hint",
-  line:     int,          // 1-based
-  end_line: int,
-  col:      int,
-  end_col:  int,
-  message:  string,
-  source:   string?,      // e.g. "lua_ls"
-  code:     (string|int)?,
-}
-```
-
-### `warnings[]`
-
-Non-fatal issues — unused `contents` labels, `indent: detect` fallbacks, `ops` or `contents` sent as a string holding their JSON (decoded and used, reason `stringified_field`), etc. The batch still applies; warnings are informational.
+The diagnostics are a whole-file tally of errors and warnings, omitted when both are 0, and under `near the edits:` the LSP diagnostics of every severity within 10 lines of an edited range, each as `line:col severity: message (source code)`.
+They are read after a per-LSP wait (300 ms for lua_ls, 5000 ms for metals, etc.) so the server has time to publish post-write findings.
 
 ## Errors and recovery
 
-Every `failed[]` entry carries a `reason` from a stable enum. Each reason
+Every failure carries a `reason` from a stable enum. Each reason
 suggests a specific recovery action.
 
 ### Schema and validation
 
-Every schema-level failure surfaces with its specific `reason` from the table below and a `field` naming the offending JSON path (`ops[0].anchor`).
+Every schema-level failure surfaces with its specific `reason` from the table below and the offending field's JSON path (`in ops[0].anchor`).
 Schema errors are detected before any file is touched, so no partial state can leak.
 
 | `reason`                      | Meaning                                                              |
@@ -557,7 +562,7 @@ The engine itself reports these as `reason: "schema_invalid"` with a `sub_reason
 
 | `reason`              | Meaning                                                    | Recovery                                                                    |
 | --------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `stale_fingerprint`   | The file changed between your read and your apply.         | Re-read the file, or just the part you are editing, and replan. The entry carries neither the content nor the live fingerprint: a fingerprint certifies that you have seen the file, and resubmitting old line numbers against the changed content would be a silent wrong-location edit. When the change happened during review, the file's `files[]` entry carries the new fingerprint with `changes` and `excerpts`, which count as a read. |
+| `stale_fingerprint`   | The file changed between your read and your apply.         | Re-read the file, or just the part you are editing, and replan. The failure carries neither the content nor the live fingerprint: a fingerprint certifies that you have seen the file, and resubmitting old line numbers against the changed content would be a silent wrong-location edit. When the change happened during review, the file's section carries the new fingerprint with `changes` and excerpts, which count as a read. |
 | `io_error`            | Could not load the file (path doesn't exist, not readable, etc.). | Verify the path. If you intended to create a new file, use `neovim__write_file` instead — `apply_edit` only modifies existing files. |
 | `invalid_range`       | `read_with_fingerprint` was called with `start_line > end_line` (both explicit). | Swap the values, or pick a single-line range with `start_line == end_line`. |
 | `start_after_eof`     | `read_with_fingerprint` was called with a `start_line` past the file's actual end. | The file is shorter than you assumed. Re-read without `start_line` first to learn `total_lines`. The entry carries `total_lines` for the recovery. |
@@ -586,7 +591,7 @@ fingerprint binding and the buffer-first semantics.
 
 Returns plain text: a header, a blank line, then the requested lines, each prefixed with its number and a tab, as in `cat -n`.
 The header adds `note: the file does not end with a newline` when that is so, and a `warning:` line when ill-formed UTF-8 was replaced.
-Failures are JSON in `apply_edit`'s `failed[]` shape.
+Failures, which carry no file text, stay JSON: `{ status, summary, failed: [ { reason, path, message, hint } ] }`.
 
 ```
 path: /abs/path/to/file

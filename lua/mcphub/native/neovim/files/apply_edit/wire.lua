@@ -19,6 +19,11 @@
 ---     sent them, and a multi-line `unique_text` made the echo as long as the
 ---     edit itself.
 ---
+--- `format` produces that flattened table; `render` turns it into the plain
+--- text the model receives, for the reason `read.render` gives: excerpts,
+--- candidates and previews are file text the model builds its next anchors
+--- from, and inside JSON every line break, tab and quote in them is escaped.
+---
 --- @module "mcphub.native.neovim.files.apply_edit.wire"
 
 local edit_read = require("mcphub.native.neovim.files.apply_edit.read")
@@ -65,6 +70,7 @@ local HANDLED = {
     conflict_op_index = true,
     conflict_range = true,
     conflicting_op_indices = true,
+    available_range = true,
     preview = true,
 }
 
@@ -91,6 +97,7 @@ function M.entry(e)
     end
     out.conflict_op = zero_based(e.conflict_op_index)
     out.conflict_lines = M.lines(e.conflict_range)
+    out.available_lines = M.lines(e.available_range)
     if type(e.conflicting_op_indices) == "table" and #e.conflicting_op_indices > 0 then
         out.conflict_ops = vim.tbl_map(zero_based, e.conflicting_op_indices)
     end
@@ -226,6 +233,246 @@ function M.format(response)
     end
     out.files = #files > 0 and files or nil
     return out
+end
+
+--------------------------------------------------------------------------------
+-- Rendering
+--------------------------------------------------------------------------------
+
+-- The lists a response groups by file, in the order a file's section shows them.
+local LISTS = { "planned", "applied", "rejected", "failed" }
+
+-- Keys of a failure or warning that its first line or its numbered lines show.
+local SHOWN = {
+    op = true,
+    kind = true,
+    lines = true,
+    reason = true,
+    file = true,
+    field = true,
+    message = true,
+    candidates = true,
+}
+
+local function plural(n, noun)
+    return n .. " " .. noun .. (n == 1 and "" or "s")
+end
+
+local function value_text(v)
+    if type(v) ~= "table" then
+        return tostring(v)
+    elseif vim.islist(v) then
+        return table.concat(vim.tbl_map(value_text, v), ", ")
+    end
+    return vim.json.encode(v)
+end
+
+--- `op 2 replace_range 10-12`
+local function op_text(e)
+    local words = {}
+    if e.op then
+        words[#words + 1] = "op " .. e.op
+    end
+    words[#words + 1] = e.kind
+    words[#words + 1] = e.lines
+    return table.concat(words, " ")
+end
+
+--- Lines labelled like `rows`' first column, right-aligned, then a tab and the text.
+--- @param rows { label: string, text: string }[]
+local function labelled(rows, out)
+    local width = 0
+    for _, r in ipairs(rows) do
+        width = math.max(width, #r.label)
+    end
+    for _, r in ipairs(rows) do
+        out[#out + 1] = string.rep(" ", width - #r.label) .. r.label .. "\t" .. r.text
+    end
+end
+
+--- A failure or warning: its first line names the op, the reason and where,
+--- then one indented line per detail, then any candidates numbered like a read.
+local function problem(label, e, out)
+    local head = label .. ": " .. (e.op and ("op " .. e.op .. " ") or "") .. tostring(e.reason)
+    if e.lines then
+        head = head .. " (lines " .. e.lines .. ")"
+    end
+    if e.field then
+        head = head .. " in " .. e.field
+    end
+    -- With no message, the hint is what there is to say about it.
+    local said = e.message and "message" or (e.hint and "hint")
+    if said then
+        head = head .. ": " .. e[said]
+    end
+    out[#out + 1] = head
+
+    local keys = {}
+    for k in pairs(e) do
+        if not SHOWN[k] and k ~= said then
+            keys[#keys + 1] = k
+        end
+    end
+    table.sort(keys, function(x, y)
+        return (x == "hint" and "" or x) < (y == "hint" and "" or y)
+    end)
+    for _, k in ipairs(keys) do
+        out[#out + 1] = "  " .. k .. ": " .. value_text(e[k])
+    end
+    if type(e.candidates) == "table" then
+        labelled(
+            vim.tbl_map(function(c)
+                return { label = c.lines, text = c.text }
+            end, e.candidates),
+            out
+        )
+    end
+end
+
+--- `applied: 2 ops in 1 file`, or each list's count when several are present.
+local function headline(out, n_files)
+    local counts = {}
+    for _, list in ipairs(LISTS) do
+        local ops, n = {}, 0
+        for _, e in ipairs(out[list] or {}) do
+            if e.op == nil or not ops[e.op] then
+                n = n + 1
+            end
+            if e.op ~= nil then
+                ops[e.op] = true
+            end
+        end
+        if n > 0 then
+            counts[#counts + 1] = { list = list, n = n }
+        end
+    end
+    local text
+    if #counts == 1 then
+        text = plural(counts[1].n, "op")
+    else
+        text = table.concat(
+            vim.tbl_map(function(c)
+                return c.n .. " " .. c.list
+            end, counts),
+            ", "
+        )
+    end
+    if n_files > 0 then
+        text = text .. " in " .. plural(n_files, "file")
+    end
+    return text == "" and tostring(out.status) or (out.status .. ": " .. text)
+end
+
+local function diagnostic_lines(info, out)
+    local counts = info.diagnostic_counts
+    if counts then
+        out[#out + 1] = string.format(
+            "diagnostics: %s, %s in the file",
+            plural(counts.errors or 0, "error"),
+            plural(counts.warnings or 0, "warning")
+        )
+    end
+    if info.diagnostics then
+        out[#out + 1] = "near the edits:"
+        for _, d in ipairs(info.diagnostics) do
+            local origin = d.source and (" (" .. d.source .. (d.code and (" " .. d.code) or "") .. ")") or ""
+            local message = tostring(d.message):gsub("\n", " ")
+            out[#out + 1] = string.format("  %d:%d %s: %s%s", d.line, d.col, d.severity, message, origin)
+        end
+    end
+end
+
+--- One file's section: its path, its state and outcomes, then its excerpts.
+local function file_section(name, f)
+    local info = f.info or {}
+    local out = { name }
+    if info.fingerprint then
+        out[#out + 1] = "fingerprint: " .. info.fingerprint .. (info.changes and "" or " (unchanged)")
+    end
+    if info.note then
+        out[#out + 1] = "note: " .. info.note
+    end
+    if info.status then
+        out[#out + 1] = "status: " .. info.status .. (info.cancel_reason and (" (" .. info.cancel_reason .. ")") or "")
+    end
+    for _, e in ipairs(f.planned) do
+        out[#out + 1] = "planned: " .. op_text(e)
+        out[#out + 1] = e.preview
+    end
+    if #f.applied > 0 then
+        out[#out + 1] = "applied: " .. table.concat(vim.tbl_map(op_text, f.applied), ", ")
+    end
+    if #f.rejected > 0 then
+        out[#out + 1] = "rejected: "
+            .. table.concat(
+                vim.tbl_map(function(e)
+                    return op_text(e) .. " (" .. tostring(e.reason) .. ")"
+                end, f.rejected),
+                ", "
+            )
+    end
+    for _, e in ipairs(f.failed) do
+        problem("failed", e, out)
+    end
+    if info.changes then
+        out[#out + 1] = "changes: "
+            .. table.concat(
+                vim.tbl_map(function(c)
+                    return c.was .. " → " .. c.now
+                end, info.changes),
+                ", "
+            )
+    end
+    diagnostic_lines(info, out)
+    local blocks = { table.concat(out, "\n") }
+    vim.list_extend(blocks, info.excerpts or {})
+    return table.concat(blocks, "\n\n")
+end
+
+--- The text the model receives for a `format`ted response: a status line and
+--- whatever concerns the request as a whole, then one section per file.
+--- Every line of file text is numbered, so the unnumbered lines between them,
+--- blank ones included, can never be mistaken for the file's.
+---
+--- @param out table  A `format`ted response.
+--- @return string
+function M.render(out)
+    local files, order, loose = {}, {}, {}
+    local function file(name)
+        if not files[name] then
+            files[name] = { planned = {}, applied = {}, rejected = {}, failed = {} }
+            order[#order + 1] = name
+        end
+        return files[name]
+    end
+    for _, f in ipairs(out.files or {}) do
+        file(f.file).info = f
+    end
+    for _, list in ipairs(LISTS) do
+        for _, e in ipairs(out[list] or {}) do
+            if e.file then
+                table.insert(file(e.file)[list], e)
+            else
+                loose[#loose + 1] = e
+            end
+        end
+    end
+
+    local top = { headline(out, #order) }
+    if out.note then
+        top[#top + 1] = "note: " .. out.note
+    end
+    for _, e in ipairs(loose) do
+        problem("failed", e, top)
+    end
+    for _, w in ipairs(out.warnings or {}) do
+        problem("warning", w, top)
+    end
+    local sections = { table.concat(top, "\n") }
+    for _, name in ipairs(order) do
+        sections[#sections + 1] = file_section(name, files[name])
+    end
+    return table.concat(sections, "\n\n")
 end
 
 return M

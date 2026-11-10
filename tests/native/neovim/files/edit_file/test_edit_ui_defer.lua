@@ -84,10 +84,18 @@ function _G.probe.active_gates()
 end
 
 --- Call the real `apply_edit` tool as a CodeCompanion chat would, recording the
---- stop hooks it registers in `_G.probe.jobs`.
+--- stop hooks it registers in `_G.probe.jobs`. The tool answers in text; the
+--- response recorded is the table it rendered, checked to be what it sent.
 function _G.probe.tool(input, defer, chat_bufnr)
     require("mcphub.state").config.builtin_tools = { apply_edit = { ui = { defer = defer } } }
     local tool = require("mcphub.native.neovim.files.apply_edit")[1]
+    local wire = require("mcphub.native.neovim.files.apply_edit.wire")
+    _G.probe.render = _G.probe.render or wire.render
+    local rendered
+    wire.render = function(t)
+        rendered = t
+        return _G.probe.render(t)
+    end
     _G.probe.response, _G.probe.jobs, _G.probe.rows = nil, {}, {}
     local res = {}
     function res:text(body)
@@ -95,7 +103,8 @@ function _G.probe.tool(input, defer, chat_bufnr)
         return self
     end
     function res:send()
-        _G.probe.response = vim.json.decode(self.body)
+        assert(self.body == _G.probe.render(rendered), "the tool sent something other than its rendered response")
+        _G.probe.response = rendered
     end
     function res:error(err)
         _G.probe.response = { error = err }

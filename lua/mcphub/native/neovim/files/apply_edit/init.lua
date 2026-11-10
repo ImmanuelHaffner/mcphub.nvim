@@ -288,7 +288,7 @@ local apply_edit_input_schema = {
             additionalProperties = { type = "string" },
         },
         dry_run = {
-            description = "Optional. If true, resolve every op and report where it would land in `planned[]` without applying anything or opening a review.",
+            description = "Optional. If true, resolve every op and report where it would land, as `planned:` lines, without applying anything or opening a review.",
             type = "boolean",
         },
     },
@@ -303,13 +303,14 @@ local apply_edit_input_schema = {
 local apply_edit_description = [[
 Apply a batch of structured edits to existing files. To create, delete or rename files use `neovim__write_file`, `neovim__delete_items`, `neovim__move_item`.
 
-Failures are plan-atomic: if any op fails to resolve, no buffer is touched and the response lists every problem with candidates and a hint — no fuzzy guessing, no silent wrong-location edits. Otherwise the user reviews each hunk and accepts or rejects it; per-op outcomes come back in `applied[]` / `rejected[]`.
-Files are reviewed one after another, and each is re-checked just before its review: a file that changed since planning (edited by the user, or changed on disk) is refused on its own, its ops listed in `failed[]` as `stale_fingerprint`, while the other files still apply and the status is `partial`. Re-read that file and replan only its ops.
-Every `applied[]` / `rejected[]` / `failed[]` entry names its op as `op`, the 0-based index into your `ops` array, and its location as `lines` (`"12"`, `"12-14"`, or `"before 12"` for an insertion), numbered in the file as you read it. An `anchor_ambiguous` failure lists `candidates` with each match's line text, so you can pick one with `occurrence: { nth }` without re-reading. Empty lists are omitted.
-`files[]` gives each file's `fingerprint` after the call; use it as the next `baseline_fingerprint` without re-reading. A file still exactly as you read it (every op on it failed or was rejected) keeps its fingerprint. A changed file also lists `changes` (`{ was, now }`: each changed region's lines in the file as you read it and as it is now; line numbers below a change shift accordingly) and `excerpts`, the changed regions as they are now, numbered like a read, with 2 lines of context. Where a long run of lines you sent landed exactly as sent, its middle is one unnumbered `⋮` line naming the lines it stands for. A file without a `fingerprint` changed too much to show; re-read it before editing it again. A failure where nothing was applied says so in `note`.
-With `dry_run: true` a batch that resolves is not applied: `planned[]` lists each op's `lines` and a numbered `preview` of the lines that frame it (all of a short range, the first and last line of a long one, the two neighbours of an insertion), so you can check placement and then resubmit without `dry_run`, with the same fingerprints.
+Failures are plan-atomic: if any op fails to resolve, no buffer is touched and the response lists every problem with candidates and a hint — no fuzzy guessing, no silent wrong-location edits. Otherwise the user reviews each hunk and accepts or rejects it.
+Files are reviewed one after another, and each is re-checked just before its review: a file that changed since planning (edited by the user, or changed on disk) is refused on its own, its ops failing with `stale_fingerprint`, while the other files still apply and the status is `partial`. Re-read that file and replan only its ops.
 
-Each op has a `kind` (`replace_range`, `insert`, `delete_range`), a `path`, a `baseline_fingerprint` (from `neovim__read_with_fingerprint` or a previous call's `files[]`; a mismatch refuses the op), and an `anchor`. Edits are line-granular: every anchor resolves to whole lines.
+The response is plain text. Its first line gives the status (`applied`, `partial`, `failed`, `cancelled`, `dry_run`) and counts, followed by a `note:` when nothing was applied and by problems with the request itself. Then comes one section per file, headed by its path, with `applied:`, `rejected:` and `failed:` lines naming each op as `op N`, the 0-based index into your `ops` array, and its location (`12`, `12-14`, or `before 12` for an insertion), numbered in the file as you read it. An `anchor_ambiguous` failure lists each match as a numbered line, so you can pick one with `occurrence: { nth }` without re-reading.
+A file's `fingerprint:` is its state after the call; use it as the next `baseline_fingerprint` without re-reading. `(unchanged)` marks a file still exactly as you read it. A changed file also lists `changes:` (`was → now`: each changed region's lines in the file as you read it and as it is now; line numbers below a change shift accordingly), and after a blank line the changed regions as they are now, numbered like a read, with 2 lines of context, blank lines between them. Where a long run of lines you sent landed exactly as sent, its middle is one unnumbered `⋮` line naming the lines it stands for. Only numbered lines are file content. A file without a fingerprint changed too much to show; re-read it before editing it again.
+With `dry_run: true` a batch that resolves is not applied: each op gets a `planned:` line and the numbered lines that frame it (all of a short range, the first and last line of a long one, the two neighbours of an insertion), so you can check placement and then resubmit without `dry_run`, with the same fingerprints.
+
+Each op has a `kind` (`replace_range`, `insert`, `delete_range`), a `path`, a `baseline_fingerprint` (from `neovim__read_with_fingerprint` or a previous call's `fingerprint:`; a mismatch refuses the op), and an `anchor`. Edits are line-granular: every anchor resolves to whole lines.
 
 ANCHORS. `line_range` names 1-based inclusive `start`/`end`. `unique_text` names a verbatim substring, possibly spanning lines, that must match exactly once unless `occurrence` picks `{ nth }` or `all` (`all` on `delete_range` only). It selects every line it touches, so `replace_range` content must be the complete new line(s), unchanged parts included. A trailing `\n` in `text` pins the match to the end of a line; a leading one is refused.
 For `replace_range` and `delete_range` the anchor IS the extent: exactly the lines it resolves to, never the surrounding block.
@@ -408,12 +409,12 @@ local apply_edit_tool = {
                         .. "lossy, so do not treat it as byte-faithful.",
                 })
             end
-            local ok_json, encoded = pcall(vim.json.encode, scrubbed)
-            if not ok_json then
-                res:error("apply_edit: failed to encode response", { response = response })
+            local ok, text = pcall(edit_wire.render, scrubbed)
+            if not ok then
+                res:error("apply_edit: failed to render response: " .. tostring(text), { response = response })
                 return
             end
-            res:text(encoded):send()
+            res:text(text):send()
         end)
     end,
 }

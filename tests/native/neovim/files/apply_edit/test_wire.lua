@@ -261,4 +261,180 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
             assert.are.same({ op = 0, file = "~/proj/a.lua", reason = "stale_fingerprint" }, out.failed[2])
         end)
     end)
+
+    describe("render", function()
+        local function render(response)
+            return wire.render(wire.format(response))
+        end
+
+        it("shows an applied batch as a status line and a section per file", function()
+            local out = render({
+                status = "applied",
+                applied = {
+                    { op_index = 1, path = HOME_FILE, kind = "insert", range = { start_line = 3, end_line = 2 } },
+                    {
+                        op_index = 2,
+                        path = HOME_FILE,
+                        kind = "replace_range",
+                        range = { start_line = 9, end_line = 9 },
+                    },
+                },
+                files = {
+                    {
+                        path = HOME_FILE,
+                        status = "completed",
+                        diagnostics = {
+                            { severity = "warn", line = 4, col = 5, message = "unused", source = "lua_ls", code = "x" },
+                        },
+                        diagnostic_counts = { errors = 0, warnings = 1 },
+                        readback = {
+                            fingerprint = "def5678",
+                            changed = true,
+                            changes = {
+                                { old = { start_line = 3, end_line = 2 }, new = { start_line = 3, end_line = 4 } },
+                                { old = { start_line = 9, end_line = 9 }, new = { start_line = 11, end_line = 11 } },
+                            },
+                            excerpts = {
+                                { start_line = 1, lines = { "a", "b", "X", "Y", "c", "" } },
+                                { start_line = 10, lines = { "g", "H", "i" } },
+                            },
+                        },
+                    },
+                },
+            })
+            assert.is.equal(
+                table.concat({
+                    "applied: 2 ops in 1 file",
+                    "",
+                    "~/proj/a.lua",
+                    "fingerprint: def5678",
+                    "applied: op 0 insert before 3, op 1 replace_range 9",
+                    "changes: before 3 → 3-4, 9 → 11",
+                    "diagnostics: 0 errors, 1 warning in the file",
+                    "near the edits:",
+                    "  4:5 warn: unused (lua_ls x)",
+                    "",
+                    "1\ta\n2\tb\n3\tX\n4\tY\n5\tc\n6\t",
+                    "",
+                    "10\tg\n11\tH\n12\ti",
+                }, "\n"),
+                out
+            )
+        end)
+
+        it("shows failures with their details, candidates numbered, request-level ones first", function()
+            local out = render({
+                status = "failed",
+                note = "Nothing was applied.",
+                failed = {
+                    {
+                        op_index = 2,
+                        path = HOME_FILE,
+                        reason = "anchor_ambiguous",
+                        anchor = { by = "unique_text", text = "end" },
+                        hint = "pick one",
+                        total_matches = 2,
+                        candidates = {
+                            { start_line = 7, end_line = 7, text = "end" },
+                            { start_line = 12, end_line = 12, text = "  end" },
+                        },
+                    },
+                    {
+                        op_index = 1,
+                        reason = "schema_invalid",
+                        sub_reason = "bad_modifier_target",
+                        path = "ops[0].anchor",
+                        message = "insert requires a positional anchor",
+                        hint = "wrap it",
+                        got = "base anchor",
+                    },
+                },
+                warnings = { { path = "ops", reason = "stringified_field", message = "decoded" } },
+            })
+            assert.is.equal(
+                table.concat({
+                    "failed: 2 ops in 1 file",
+                    "note: Nothing was applied.",
+                    "failed: op 0 bad_modifier_target in ops[0].anchor: insert requires a positional anchor",
+                    "  hint: wrap it",
+                    "  got: base anchor",
+                    "warning: stringified_field in ops: decoded",
+                    "",
+                    "~/proj/a.lua",
+                    "failed: op 1 anchor_ambiguous: pick one",
+                    "  total_matches: 2",
+                    " 7\tend",
+                    "12\t  end",
+                }, "\n"),
+                out
+            )
+        end)
+
+        it("shows rejections, unchanged and withheld files, and a cancelled review", function()
+            local OTHER = vim.fn.expand("~") .. "/proj/b.lua"
+            local out = render({
+                status = "cancelled",
+                rejected = {
+                    {
+                        op_index = 1,
+                        path = HOME_FILE,
+                        kind = "delete_range",
+                        range = { start_line = 2, end_line = 3 },
+                        reason = "rejected",
+                    },
+                    {
+                        op_index = 2,
+                        path = OTHER,
+                        kind = "insert",
+                        range = { start_line = 1, end_line = 0 },
+                        reason = "cancelled",
+                    },
+                },
+                files = {
+                    { path = HOME_FILE, status = "completed", readback = { fingerprint = "abc1234", changed = false } },
+                    {
+                        path = OTHER,
+                        status = "cancelled",
+                        cancel_reason = "closed",
+                        readback = { fingerprint = "0123456", changed = true, changes = {} },
+                    },
+                },
+            })
+            assert.is.equal(
+                table.concat({
+                    "cancelled: 2 ops in 2 files",
+                    "",
+                    "~/proj/a.lua",
+                    "fingerprint: abc1234 (unchanged)",
+                    "rejected: op 0 delete_range 2-3 (rejected)",
+                    "",
+                    "~/proj/b.lua",
+                    "note: changed too much to show here; re-read it before editing it again",
+                    "status: cancelled (closed)",
+                    "rejected: op 1 insert before 1 (cancelled)",
+                }, "\n"),
+                out
+            )
+        end)
+
+        it("shows a dry run's previews under their ops", function()
+            local out = render({
+                status = "dry_run",
+                note = "n",
+                planned = {
+                    {
+                        op_index = 1,
+                        path = HOME_FILE,
+                        kind = "replace_range",
+                        range = { start_line = 4, end_line = 4 },
+                        preview = { { line = 4, text = "d" } },
+                    },
+                },
+            })
+            assert.is.equal(
+                "dry_run: 1 op in 1 file\nnote: n\n\n~/proj/a.lua\nplanned: op 0 replace_range 4\n4\td",
+                out
+            )
+        end)
+    end)
 end)
