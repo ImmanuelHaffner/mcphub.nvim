@@ -241,7 +241,7 @@ describe("mcphub.native.neovim.files.apply_edit.engine.apply end-to-end (accept_
         assert.is.equal(1, #response.failed)
         local entry = response.failed[1]
         assert.is.equal("stale_fingerprint", entry.reason)
-        assert(entry.live_fingerprint ~= nil, "stale failure should carry live_fingerprint")
+        assert(entry.live_fingerprint == nil, "stale failure must not hand out the live fingerprint")
         assert(entry.live_content == nil, "stale failure must not echo the file back")
 
         cleanup_fixture(path, bufnr)

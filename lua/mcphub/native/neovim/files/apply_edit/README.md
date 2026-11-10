@@ -465,7 +465,7 @@ Conflicts the EditUI driver detects after widening adjacent edits are not visibl
 `lines` is the resolved location in the file as the LLM read it: `"12"`, `"12-14"`, or `"before 12"` for an insertion position.
 
 `rejected[]` entries carry `reason`: `rejected` (the user rejected the op's hunks), `partially_rejected` (some hunks accepted, some not) or `cancelled` (the review closed before deciding).
-`failed[]` entries carry a `reason` from [Errors and recovery](#errors-and-recovery), a `message`, a `hint`, and reason-specific fields: `candidates` (`{ lines, text }`, the matched line's text cut at 120 bytes) and `total_matches` for `anchor_ambiguous`, `live_fingerprint` for `stale_fingerprint`, `conflict_op` / `conflict_lines` / `conflict_ops` for `range_conflict`.
+`failed[]` entries carry a `reason` from [Errors and recovery](#errors-and-recovery), a `message`, a `hint`, and reason-specific fields: `candidates` (`{ lines, text }`, the matched line's text cut at 120 bytes) and `total_matches` for `anchor_ambiguous`, `conflict_op` / `conflict_lines` / `conflict_ops` for `range_conflict`.
 The request's own `anchor` and `baseline_fingerprint` are not echoed back.
 
 ### `files[]`
@@ -554,7 +554,7 @@ The engine itself reports these as `reason: "schema_invalid"` with a `sub_reason
 
 | `reason`              | Meaning                                                    | Recovery                                                                    |
 | --------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `stale_fingerprint`   | The file changed between your read and your apply.         | The entry carries `live_fingerprint` (the current hash) but deliberately not the content, which used to be echoed once per stale op. Re-read the file, or just the part you are editing, and replan. |
+| `stale_fingerprint`   | The file changed between your read and your apply.         | Re-read the file, or just the part you are editing, and replan. The entry carries neither the content nor the live fingerprint: a fingerprint certifies that you have seen the file, and resubmitting old line numbers against the changed content would be a silent wrong-location edit. When the change happened during review, the file's `files[]` entry carries the new fingerprint with `changes` and `excerpts`, which count as a read. |
 | `io_error`            | Could not load the file (path doesn't exist, not readable, etc.). | Verify the path. If you intended to create a new file, use `neovim__write_file` instead — `apply_edit` only modifies existing files. |
 | `invalid_range`       | `read_with_fingerprint` was called with `start_line > end_line` (both explicit). | Swap the values, or pick a single-line range with `start_line == end_line`. |
 | `start_after_eof`     | `read_with_fingerprint` was called with a `start_line` past the file's actual end. | The file is shorter than you assumed. Re-read without `start_line` first to learn `total_lines`. The entry carries `total_lines` for the recovery. |

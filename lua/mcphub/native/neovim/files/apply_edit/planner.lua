@@ -59,12 +59,13 @@
 ---
 --- For each op, the planner computes the live file's fingerprint and
 --- compares it against `op.baseline_fingerprint`. Mismatch produces a
---- `stale_fingerprint` failure carrying the live fingerprint but not the
---- content: echoing the file once per stale op made a failed response
---- several times the size of the file, and the LLM usually needs only a
---- slice of it to replan. The check runs between `read_files` and
---- `resolve_anchors` because there's no point resolving anchors
---- against bytes the LLM didn't see.
+--- `stale_fingerprint` failure carrying neither the content nor the live
+--- fingerprint. Echoing the file once per stale op made a failed response
+--- several times the size of the file, and a live fingerprint would let the
+--- LLM resubmit line numbers it never saw against the changed file: it has to
+--- re-read. The check runs between `read_files` and `resolve_anchors`
+--- because there's no point resolving anchors against bytes the LLM didn't
+--- see.
 ---
 --- The check is gated on `opts.bypass_fingerprint`. When true (a
 --- test-only bypass), the planner skips the fingerprint phase entirely
@@ -330,9 +331,9 @@ end
 --- fingerprint. One failure per op whose file mutated since the LLM
 --- read it.
 ---
---- The failure carries the **live** fingerprint, and the op's claimed
---- (stale) fingerprint as `baseline_fingerprint`. It deliberately omits
---- the live content; see the module header.
+--- The failure carries the op's claimed (stale) fingerprint as
+--- `baseline_fingerprint`, and deliberately neither the live content nor
+--- the live fingerprint; see the module header.
 ---
 --- Skips ops whose file failed to load (those produced an io_error
 --- already; no point comparing fingerprints against bytes we don't
@@ -347,14 +348,12 @@ local function validate_fingerprints(ops, records)
         local abs = vim.fn.fnamemodify(op.path, ":p")
         local rec = records[abs]
         if rec ~= nil then
-            local live = fingerprint.compute(rec.content)
-            if op.baseline_fingerprint ~= live then
+            if op.baseline_fingerprint ~= fingerprint.compute(rec.content) then
                 failures[#failures + 1] = {
                     op_index = op_index,
                     reason = schema.ERROR_REASONS.stale_fingerprint,
                     path = op.path,
                     baseline_fingerprint = op.baseline_fingerprint,
-                    live_fingerprint = live,
                     message = "the file changed since you read it; nothing was applied.",
                     hint = "re-read the file (or the part you are editing) with "
                         .. "neovim__read_with_fingerprint and replan against the new content.",

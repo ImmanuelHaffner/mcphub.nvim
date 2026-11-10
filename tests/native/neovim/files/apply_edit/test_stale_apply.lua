@@ -159,7 +159,7 @@ T["a file edited while an earlier file is in review is refused, and the earlier 
     eq(#response.failed, 1)
     eq(response.failed[1].reason, "stale_fingerprint")
     eq(response.failed[1].op_index, 2)
-    eq(response.failed[1].live_fingerprint, fingerprint(two))
+    eq(response.failed[1].live_fingerprint, nil)
     eq(child.fn.readfile(one), { "A2", "B", "C" })
     -- Neither the user's edit nor the file on disk was touched.
     eq(child.lua_get("_G.probe.lines(...)", { two }), { "X", "dup", "Y", "dup", "Z edited" })
@@ -290,7 +290,7 @@ T["a file changed on disk during an earlier review is refused, even when showing
     eq(#response.failed, 1)
     eq(response.failed[1].reason, "stale_fingerprint")
     eq(response.failed[1].live_content, nil)
-    eq(response.failed[1].live_fingerprint ~= response.failed[1].baseline_fingerprint, true)
+    eq(response.failed[1].live_fingerprint, nil)
     eq(child.fn.readfile(two), { "inserted", "X", "dup", "Y", "dup", "Z" })
     -- The refused review leaves no window behind.
     eq(child.fn.win_findbuf(child.fn.bufnr(two)), {})

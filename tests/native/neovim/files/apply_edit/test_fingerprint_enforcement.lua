@@ -241,7 +241,7 @@ describe("mcphub.native.neovim.files.apply_edit.planner fingerprint enforcement 
             assert.is.equal(path, stale_fail.path)
             assert.is.equal(stale, stale_fail.baseline_fingerprint)
             assert.is_nil(stale_fail.live_content)
-            assert(stale_fail.live_fingerprint ~= stale, "live_fingerprint should differ from the stale baseline")
+            assert.is_nil(stale_fail.live_fingerprint)
             assert.is_truthy(stale_fail.hint:find("neovim__read_with_fingerprint", 1, true))
             cleanup(path)
         end)

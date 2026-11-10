@@ -202,7 +202,6 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
                         path = HOME_FILE,
                         reason = "stale_fingerprint",
                         baseline_fingerprint = "0000000",
-                        live_fingerprint = "abcdef0",
                     },
                 },
             })
@@ -215,10 +214,7 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
                 conflict_lines = "4-5",
                 conflict_ops = { 0, 1 },
             }, out.failed[1])
-            assert.are.same(
-                { op = 0, file = "~/proj/a.lua", reason = "stale_fingerprint", live_fingerprint = "abcdef0" },
-                out.failed[2]
-            )
+            assert.are.same({ op = 0, file = "~/proj/a.lua", reason = "stale_fingerprint" }, out.failed[2])
         end)
     end)
 end)

@@ -701,11 +701,10 @@ end
 --- located in. Nothing has been applied. The failures mirror the planner's
 --- `stale_fingerprint` entries, one per op: an op can span several blocks.
 ---
---- @param request      mcphub.edit.applier.FileRequest
---- @param live_content string  The buffer's current normalised content.
+--- @param request mcphub.edit.applier.FileRequest
 --- @return mcphub.edit.applier.FileOutcome
-local function stale_outcome(request, live_content)
-    local baseline, live = fingerprint.compute(request.original_content), fingerprint.compute(live_content)
+local function stale_outcome(request)
+    local baseline = fingerprint.compute(request.original_content)
     local failures, seen = {}, {}
     for _, b in ipairs(request.blocks) do
         if not seen[b.op_index] then
@@ -715,7 +714,6 @@ local function stale_outcome(request, live_content)
                 reason = schema.ERROR_REASONS.stale_fingerprint,
                 path = request.file_path,
                 baseline_fingerprint = baseline,
-                live_fingerprint = live,
                 message = "the file changed after the batch was planned; this op was not applied.",
                 hint = "the file changed while this edit waited to be applied. "
                     .. "Re-read it with neovim__read_with_fingerprint and replan "
@@ -748,7 +746,7 @@ function M.drive_file(request, file_cb, config)
     request.bufnr = buffer.load_hidden(request.file_path) or request.bufnr
     local reference_hash = vim.fn.sha256(request.original_content)
     if buffer.content_hash(request.bufnr) ~= reference_hash then
-        return file_cb(stale_outcome(request, (buffer.normalised_content(request.bufnr))))
+        return file_cb(stale_outcome(request))
     end
 
     -- Note: `EditUI` is required lazily below (just before instantiation),
@@ -919,9 +917,9 @@ function M.drive_file(request, file_cb, config)
         located_blocks = located_blocks,
         original_content = request.original_content,
         reference_hash = reference_hash,
-        on_stale = function(live_content)
+        on_stale = function()
             ui:cleanup()
-            file_cb(stale_outcome(request, live_content))
+            file_cb(stale_outcome(request))
         end,
         on_complete = function()
             finalise("completed", nil)
