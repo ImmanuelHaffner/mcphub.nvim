@@ -312,4 +312,49 @@ function M.read_with_fingerprint(path, opts)
     }
 end
 
+--- Prefix each line with its number and a tab, `cat -n` style.
+---
+--- @param lines string[]
+--- @param first integer  Number of `lines[1]`.
+--- @return string
+function M.number_lines(lines, first)
+    local fmt = "%" .. #tostring(first + #lines - 1) .. "d\t%s"
+    local out = {}
+    for i, line in ipairs(lines) do
+        out[i] = string.format(fmt, first + i - 1, line)
+    end
+    return table.concat(out, "\n")
+end
+
+--- Render a successful read as the text the LLM receives: a short header,
+--- a blank line, then the numbered lines.
+---
+--- Plain text rather than JSON, because inside a JSON string every line
+--- break and quote is escaped: the model had to count `\n` escapes to
+--- find a line number and unescape text to build a `unique_text` anchor,
+--- and got both wrong often enough to misplace edits.
+---
+--- @param r       table    A successful `read_with_fingerprint` response.
+--- @param warning string?  Appended to the header, e.g. a lossy-encoding note.
+--- @return string
+function M.render(r, warning)
+    local lines = vim.split(r.content, "\n", { plain = true })
+    local eol = lines[#lines] == ""
+    if eol then
+        lines[#lines] = nil
+    end
+    local header = {
+        "path: " .. r.path,
+        "baseline_fingerprint: " .. r.baseline_fingerprint,
+        string.format("lines: %d-%d of %d", r.start_line, r.end_line, r.total_lines),
+    }
+    if not eol then
+        header[#header + 1] = "note: the file does not end with a newline"
+    end
+    if warning then
+        header[#header + 1] = "warning: " .. warning
+    end
+    return table.concat(header, "\n") .. "\n\n" .. M.number_lines(lines, r.start_line)
+end
+
 return M

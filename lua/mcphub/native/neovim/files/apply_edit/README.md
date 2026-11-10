@@ -74,19 +74,16 @@ You get the fingerprint by calling `neovim__read_with_fingerprint` first:
 { "path": "/tmp/example.txt" }
 ```
 
-which returns
+which returns plain text — a header, a blank line, then the lines numbered as in `cat -n`:
 
-```json
-{
-  "status": "ok",
-  "path": "/tmp/example.txt",
-  "content": "line 1\nline 2\nline 3\n",
-  "baseline_fingerprint": "a1b2c3d",
-  "start_line": 1,
-  "end_line": 3,
-  "returned_lines": 3,
-  "total_lines": 3
-}
+```
+path: /tmp/example.txt
+baseline_fingerprint: a1b2c3d
+lines: 1-3 of 3
+
+1	line 1
+2	line 2
+3	line 3
 ```
 
 On failure (file missing, unreadable, etc.) you get:
@@ -567,20 +564,23 @@ fingerprint binding and the buffer-first semantics.
 { "path": "/abs/path/to/file" }
 ```
 
-Returns:
+Returns plain text: a header, a blank line, then the requested lines, each prefixed with its number and a tab, as in `cat -n`.
+The header adds `note: the file does not end with a newline` when that is so, and a `warning:` line when ill-formed UTF-8 was replaced.
+Failures are JSON in `apply_edit`'s `failed[]` shape.
 
-```json
-{
-  "status": "ok",
-  "path": "/abs/path/to/file",
-  "content": "line 1\nline 2\n...",
-  "baseline_fingerprint": "a1b2c3d",
-  "start_line": 1,
-  "end_line": 42,
-  "returned_lines": 42,
-  "total_lines": 42
-}
 ```
+path: /abs/path/to/file
+baseline_fingerprint: a1b2c3d
+lines: 1-42 of 42
+
+ 1	line 1
+ 2	line 2
+...
+```
+
+The numbers are not part of the file, so an anchor or `content` must never include them.
+They exist because a JSON string escapes every line break and quote: the model had to count `\n` escapes to find a line number and unescape text to build a `unique_text` anchor, and got both wrong often enough to misplace edits.
+`read.read_with_fingerprint` still returns the Lua table (`content`, `start_line`, `end_line`, `returned_lines`, `total_lines`); the tool renders it with `read.render`.
 
 ### Range projection
 
@@ -591,20 +591,14 @@ restrict the returned `content` to a slice of the file:
 { "path": "/abs/path/to/file", "start_line": 100, "end_line": 150 }
 ```
 
-The response carries the **echoed** range (clamped to file bounds), the
-number of lines actually returned, and the total file size:
+The header echoes the range, clamped to file bounds, and the total file size:
 
-```json
-{
-  "status": "ok",
-  "path": "/abs/path/to/file",
-  "content": "...lines 100..150...",
-  "baseline_fingerprint": "a1b2c3d",
-  "start_line": 100,
-  "end_line": 150,
-  "returned_lines": 51,
-  "total_lines": 942
-}
+```
+path: /abs/path/to/file
+baseline_fingerprint: a1b2c3d
+lines: 100-150 of 942
+
+100	...
 ```
 
 Defaults: `start_line = 1`, `end_line = total_lines`. Either field may

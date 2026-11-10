@@ -491,8 +491,8 @@ This is the **canonical** read path for text files. Prefer it over `execute_comm
 
 Optional range projection: pass `start_line` and/or `end_line` (1-based, inclusive) to restrict the returned `content` to a slice of the file. Defaults: `start_line = 1`, `end_line = total_lines`. `end_line` past EOF clamps silently; `start_line` past EOF refuses with `start_after_eof` (your view of the file is stale). The `baseline_fingerprint` is always whole-file regardless of the range — do not assume a partial read pins only the part you read.
 
-Returns on success: { status: "ok", path, content, baseline_fingerprint, start_line, end_line, returned_lines, total_lines }
-On error: { status: "failed", summary, failed: [{ reason, path, message, hint, ... }] }
+Returns on success a short header (`path`, `baseline_fingerprint`, `lines: <start>-<end> of <total>`, and a note when the file does not end with a newline), a blank line, then the requested lines, each prefixed with its line number and a tab, as in `cat -n`. The prefix is not part of the file: never copy it into a `unique_text` anchor or into `content`.
+On error: JSON { status: "failed", summary, failed: [{ reason, path, message, hint, ... }] }
 ]]
 
 ---@type MCPTool
@@ -504,36 +504,29 @@ local read_with_fingerprint_tool = {
         local params = req.params or {}
         local response =
             edit_read.read_with_fingerprint(params.path, { start_line = params.start_line, end_line = params.end_line })
-        -- Scrub to well-formed UTF-8 before encoding. The file `content`
-        -- echoed here can contain ill-formed bytes (WTF-8/CESU-8 surrogate
-        -- encodings, corrupted text) that `vim.json.encode` would pass
-        -- through unescaped, poisoning the chat's next request. `replaced`
-        -- counts bytes swapped for U+FFFD.
+        -- Scrub to well-formed UTF-8. The file content echoed here can contain
+        -- ill-formed bytes (WTF-8/CESU-8 surrogate encodings, corrupted text)
+        -- that would poison the chat's next request. `replaced` counts bytes
+        -- swapped for U+FFFD.
         local scrubbed, replaced = edit_json.scrub(response)
+        if scrubbed.status ~= "ok" then
+            local ok_json, encoded = pcall(vim.json.encode, scrubbed)
+            if not ok_json then
+                return res:error("read_with_fingerprint: failed to encode response", { response = response })
+            end
+            return res:text(encoded):send()
+        end
+        local warning
         if replaced > 0 then
-            -- This response shape has no `warnings[]` array; attach a
-            -- top-level note so the LLM knows the returned content is lossy
-            -- and must not be treated as byte-faithful (e.g. do not build a
-            -- `unique_text` anchor from a span that includes a U+FFFD).
-            scrubbed.encoding_warning = {
-                reason = "content_encoding_lossy",
-                message = string.format(
-                    "%d byte(s) of ill-formed UTF-8 in this file were shown "
-                        .. "as U+FFFD (\239\191\189) replacement characters in the "
-                        .. "returned content.",
-                    replaced
-                ),
-                hint = "the file is not valid UTF-8 at those positions; the "
-                    .. "returned `content` is lossy there. Do not anchor edits "
-                    .. "(unique_text) on a span containing a replacement "
-                    .. "character \226\128\148 it will not match the real bytes.",
-            }
+            -- The model must not treat the content as byte-faithful, e.g. build a
+            -- `unique_text` anchor from a span that includes a U+FFFD.
+            warning = string.format(
+                "%d byte(s) of ill-formed UTF-8 are shown as U+FFFD (\239\191\189); "
+                    .. "do not anchor unique_text on a span containing one, it will not match the real bytes.",
+                replaced
+            )
         end
-        local ok_json, encoded = pcall(vim.json.encode, scrubbed)
-        if not ok_json then
-            return res:error("read_with_fingerprint: failed to encode response", { response = response })
-        end
-        return res:text(encoded):send()
+        return res:text(edit_read.render(scrubbed, warning)):send()
     end,
 }
 

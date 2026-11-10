@@ -414,3 +414,26 @@ describe("mcphub.native.neovim.files.apply_edit.read.read_with_fingerprint", fun
         end)
     end)
 end)
+
+describe("mcphub.native.neovim.files.apply_edit.read.render", function()
+    it("numbers a slice from its first line, padding to the widest number", function()
+        local tmp = write_tempfile(string.rep("x\n", 8) .. "nine\nten\n  eleven\n")
+        local r = edit_read.read_with_fingerprint(tmp, { start_line = 9, end_line = 11 })
+        assert.is.equal(
+            "path: "
+                .. tmp
+                .. "\nbaseline_fingerprint: "
+                .. r.baseline_fingerprint
+                .. "\nlines: 9-11 of 11\n\n 9\tnine\n10\tten\n11\t  eleven",
+            edit_read.render(r)
+        )
+        cleanup(tmp)
+    end)
+
+    it("notes a missing final newline and appends a warning", function()
+        local tmp = write_tempfile("a\nb")
+        local out = edit_read.render(edit_read.read_with_fingerprint(tmp), "lossy")
+        assert.is_truthy(out:find("\nnote: the file does not end with a newline\nwarning: lossy\n\n1\ta\n2\tb$"))
+        cleanup(tmp)
+    end)
+end)
