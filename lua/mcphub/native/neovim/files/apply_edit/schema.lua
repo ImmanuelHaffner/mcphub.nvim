@@ -574,7 +574,7 @@ local function validate_anchor(anchor, path, errors, op_index, require_position)
                         hint = string.format(
                             'wrap your anchor: { by: "after", of: <your current anchor> }. '
                                 .. 'Use "before"/"after" to insert above/below a base anchor, '
-                                .. 'or { by: "between", above: ..., below: ... } to insert at the seam '
+                                .. 'or { by: "between", before_text: ..., after_text: ... } to insert at the seam '
                                 .. "between two adjacent texts."
                         ),
                     }

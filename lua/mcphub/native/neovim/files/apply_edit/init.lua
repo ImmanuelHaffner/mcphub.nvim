@@ -22,6 +22,7 @@ local State = require("mcphub.state")
 local edit = require("mcphub.native.neovim.files.apply_edit.engine")
 local edit_json = require("mcphub.native.neovim.files.apply_edit.json")
 local edit_read = require("mcphub.native.neovim.files.apply_edit.read")
+local edit_wire = require("mcphub.native.neovim.files.apply_edit.wire")
 local focus_gate = require("mcphub.native.neovim.files.edit_file.focus_gate")
 
 --------------------------------------------------------------------------------
@@ -300,7 +301,8 @@ local apply_edit_description = [[
 Apply a batch of structured edits to existing files. Use this for editing *inside* existing files; for file create / delete / rename use `neovim__write_file`, `neovim__delete_items`, `neovim__move_item`.
 
 Failures are plan-atomic: if any op fails to resolve, no buffer is touched and the response lists every problem with candidates and a hint — no fuzzy guessing, no silent wrong-location edits. Otherwise the user reviews each hunk and accepts or rejects it; per-op outcomes come back in `applied[]` / `rejected[]`.
-Files are reviewed one after another, and each is re-checked just before its review: a file that changed since planning (edited by the user, or changed on disk) is refused on its own, its ops listed in `failed[]` as `stale_fingerprint` with the file's `live_content`, while the other files still apply and the status is `partial`. Re-read that file and replan only its ops.
+Files are reviewed one after another, and each is re-checked just before its review: a file that changed since planning (edited by the user, or changed on disk) is refused on its own, its ops listed in `failed[]` as `stale_fingerprint`, while the other files still apply and the status is `partial`. Re-read that file and replan only its ops.
+Every `applied[]` / `rejected[]` / `failed[]` entry names its op as `op`, the 0-based index into your `ops` array, and its location as `lines` (`"12"`, `"12-14"`, or `"before 12"` for an insertion), numbered in the file as you read it. An `anchor_ambiguous` failure lists `candidates` with each match's line text, so you can pick one with `occurrence: { nth }` without re-reading. Empty lists are omitted.
 
 Each op has a `kind`, a `path`, a `baseline_fingerprint` (from `neovim__read_with_fingerprint`; a mismatch means the file changed under you and the op is refused), and an `anchor`.
 
@@ -423,7 +425,7 @@ local apply_edit_tool = {
             -- unescaped, which a strict downstream JSON parser rejects and
             -- which wedges the whole chat on the next request. `replaced`
             -- counts how many bytes were swapped for U+FFFD.
-            local scrubbed, replaced = edit_json.scrub(response)
+            local scrubbed, replaced = edit_json.scrub(edit_wire.format(response))
             if replaced > 0 then
                 -- Surface the lossy echo to the LLM as a non-fatal warning
                 -- so it knows the content it sees is not byte-faithful.

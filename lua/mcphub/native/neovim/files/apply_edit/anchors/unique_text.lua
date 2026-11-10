@@ -93,6 +93,33 @@ local function match_to_range(record, match)
     }
 end
 
+--- Longest candidate line echoed back, in bytes; longer lines are cut.
+M.CANDIDATE_TEXT_MAX = 120
+
+--- The text of the line containing byte `pos`, truncated to
+--- `CANDIDATE_TEXT_MAX` bytes on a UTF-8 boundary.
+---
+--- @param content string
+--- @param pos     integer
+--- @return string
+local function line_text(content, pos)
+    local s = pos
+    while s > 1 and content:byte(s - 1) ~= 10 do
+        s = s - 1
+    end
+    local e = content:find("\n", pos, true)
+    local line = content:sub(s, (e or #content + 1) - 1)
+    if #line <= M.CANDIDATE_TEXT_MAX then
+        return line
+    end
+    local cut = M.CANDIDATE_TEXT_MAX
+    -- Back off continuation bytes (10xxxxxx) so the cut never splits a character.
+    while cut > 0 and bit.band(line:byte(cut + 1), 0xC0) == 0x80 do
+        cut = cut - 1
+    end
+    return line:sub(1, cut) .. "..."
+end
+
 --- Resolve a `unique_text` anchor against a file record.
 ---
 --- Return shapes:
@@ -141,11 +168,13 @@ function M.resolve(anchor, record)
         if n_matches == 1 then
             return match_to_range(record, matches[1]), nil
         end
-        -- Ambiguous.
+        -- Ambiguous. Each candidate carries its first line's text, so the
+        -- LLM can pick one by `occurrence.nth` without re-reading the file.
         local candidates = {}
         local capped = math.min(n_matches, M.CANDIDATE_CAP)
         for i = 1, capped do
             candidates[i] = match_to_range(record, matches[i])
+            candidates[i].text = line_text(record.content, matches[i].byte_start)
         end
         local total = n_matches > M.CANDIDATE_CAP and string.format(">%d", M.CANDIDATE_CAP) or n_matches
         local hint

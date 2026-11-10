@@ -59,9 +59,10 @@
 ---
 --- For each op, the planner computes the live file's fingerprint and
 --- compares it against `op.baseline_fingerprint`. Mismatch produces a
---- `stale_fingerprint` failure carrying both the live fingerprint and
---- the content, so the LLM can replan in its next turn without an
---- extra read round-trip. The check runs between `read_files` and
+--- `stale_fingerprint` failure carrying the live fingerprint but not the
+--- content: echoing the file once per stale op made a failed response
+--- several times the size of the file, and the LLM usually needs only a
+--- slice of it to replan. The check runs between `read_files` and
 --- `resolve_anchors` because there's no point resolving anchors
 --- against bytes the LLM didn't see.
 ---
@@ -329,11 +330,9 @@ end
 --- fingerprint. One failure per op whose file mutated since the LLM
 --- read it.
 ---
---- The failure carries the **live** fingerprint and the **live**
---- content, so the LLM's next-turn replan does not need an extra
---- read round-trip. The op's claimed (stale) fingerprint is also
---- echoed back as `baseline_fingerprint` for symmetry with the
---- request shape.
+--- The failure carries the **live** fingerprint, and the op's claimed
+--- (stale) fingerprint as `baseline_fingerprint`. It deliberately omits
+--- the live content; see the module header.
 ---
 --- Skips ops whose file failed to load (those produced an io_error
 --- already; no point comparing fingerprints against bytes we don't
@@ -356,11 +355,9 @@ local function validate_fingerprints(ops, records)
                     path = op.path,
                     baseline_fingerprint = op.baseline_fingerprint,
                     live_fingerprint = live,
-                    live_content = rec.content,
-                    hint = "the file has changed since you read it. "
-                        .. "Re-read with neovim__read_with_fingerprint to get the "
-                        .. "current fingerprint and content, then replan against "
-                        .. "the new line numbers / substrings.",
+                    message = "the file changed since you read it; nothing was applied.",
+                    hint = "re-read the file (or the part you are editing) with "
+                        .. "neovim__read_with_fingerprint and replan against the new content.",
                 }
             end
         end

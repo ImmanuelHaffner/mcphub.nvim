@@ -301,14 +301,11 @@ local function detect_widen_collisions(bufnr, blocks)
             failures[#failures + 1] = {
                 op_index = b.op_index,
                 reason = "range_conflict",
-                message = string.format(
-                    "op %d cannot be applied in this batch: its effective range after "
-                        .. "EditUI widening overlaps with op(s) %s. Re-issue the ops in "
-                        .. "separate batches, or change the anchor of one to a non-adjacent "
-                        .. "location.",
-                    b.op_index,
-                    table.concat(peer_op_indices, ", ")
-                ),
+                -- No op numbers in the text: the wire format renumbers ops
+                -- from 0, and the entry already names its peers.
+                message = "this op cannot be applied in this batch: its effective range after "
+                    .. "EditUI widening overlaps with the ops in `conflict_ops`. Re-issue the ops in "
+                    .. "separate batches, or change the anchor of one to a non-adjacent location.",
                 range = { start_line = b.range.start_line, end_line = b.range.end_line },
                 conflicting_op_indices = peer_op_indices,
             }
@@ -330,12 +327,11 @@ local function detect_widen_collisions(bufnr, blocks)
             failures[#failures + 1] = {
                 op_index = b.op_index,
                 reason = "range_conflict",
-                message = string.format(
-                    "op %d cannot be applied by the EditUI driver: %s",
-                    b.op_index,
-                    (b.kind == "delete_range") and "whole-file deletion has no neighbouring line to borrow"
+                message = "this op cannot be applied by the EditUI driver: "
+                    .. (
+                        (b.kind == "delete_range") and "whole-file deletion has no neighbouring line to borrow"
                         or "insertion into an empty buffer has no neighbouring line to borrow"
-                ),
+                    ),
                 range = { start_line = b.range.start_line, end_line = b.range.end_line },
                 conflicting_op_indices = {},
             }
@@ -720,12 +716,7 @@ local function stale_outcome(request, live_content)
                 path = request.file_path,
                 baseline_fingerprint = baseline,
                 live_fingerprint = live,
-                live_content = live_content,
-                message = string.format(
-                    "`%s` changed after the batch was planned; op %d was not applied.",
-                    request.file_path,
-                    b.op_index
-                ),
+                message = "the file changed after the batch was planned; this op was not applied.",
                 hint = "the file changed while this edit waited to be applied. "
                     .. "Re-read it with neovim__read_with_fingerprint and replan "
                     .. "against the current content.",

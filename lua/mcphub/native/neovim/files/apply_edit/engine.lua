@@ -37,7 +37,7 @@ end
 --- Forward planner failures as `failed[]` entries. Each planner failure
 --- already carries `reason` (from `schema.ERROR_REASONS`), `op_index`,
 --- `path`, and reason-specific fields (`candidates`, `live_fingerprint`,
---- `live_content`, etc.); we pass them through verbatim.
+--- etc.); we pass them through verbatim.
 local function planner_failures_to_failed(failures)
     local failed = {}
     for _, f in ipairs(failures) do

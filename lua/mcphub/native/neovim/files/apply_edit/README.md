@@ -103,13 +103,9 @@ Successful apply returns
 
 ```json
 {
-  "status":   "applied",
-  "summary":  "applied 1, rejected 0, failed 0 across 1 file(s)",
-  "applied":  [ { "op_index": 1, "kind": "replace_range", "path": "...", "range": { "start_line": 2, "end_line": 2 } } ],
-  "rejected": [],
-  "failed":   [],
-  "files":    [ { "path": "...", "status": "completed", "diagnostics": [], "ui_summary": "..." } ],
-  "warnings": []
+  "status":  "applied",
+  "summary": "applied 1, rejected 0, failed 0 across 1 file(s)",
+  "applied": [ { "op": 0, "kind": "replace_range", "file": "~/...", "lines": "2" } ]
 }
 ```
 
@@ -430,21 +426,21 @@ buffers take precedence over their on-disk file at every read and apply.
 
 ## The response
 
-The top-level shape:
+What the LLM receives is the engine's response flattened by `wire.lua` at the MCP boundary; Lua callers of `engine.apply` get the unflattened shape documented in `applier.lua`.
 
 ```
 {
   status:   "applied" | "partial" | "failed" | "cancelled",
-  summary:  string,                                  // human-readable
-  applied:  [ AppliedEntry, ... ],
-  rejected: [ RejectedEntry, ... ],
-  failed:   [ FailedEntry, ... ],
-  files:    [ FileEntry, ... ],
-  warnings: [ Warning, ... ],
+  summary:  string,
+  applied:  [ Entry, ... ]?,
+  rejected: [ Entry, ... ]?,
+  failed:   [ Entry, ... ]?,
+  files:    [ FileEntry, ... ]?,
+  warnings: [ Entry, ... ]?,
 }
 ```
 
-The status reflects what actually happened:
+Every list is omitted when empty.
 
 | `status`     | Meaning                                                            |
 | ------------ | ------------------------------------------------------------------ |
@@ -453,59 +449,36 @@ The status reflects what actually happened:
 | `"failed"`   | No ops applied; one or more failed.                                |
 | `"cancelled"`| User cancelled the review session and no ops landed.               |
 
-### `applied[]`
-
-One entry per op whose changes landed on disk:
+### Entries
 
 ```
-{ op_index: int, kind: string, path: string, range: { start_line, end_line } }
+{ op: int?, file: string?, field: string?, kind: string?, lines: string?, reason: string?, ... }
 ```
 
-`op_index` is 1-based — matches the position in your input `ops` array
-(the JSON wire form uses 0-based; the response is 1-based).
+`op` is the **0-based** index into the request's `ops`, the same number a schema error's `field` (`ops[0].anchor`) uses; request-level errors have none.
+`file` is the path, home-relative.
+`lines` is the resolved location in the file as the LLM read it: `"12"`, `"12-14"`, or `"before 12"` for an insertion position.
 
-`range` is the **resolved** range from the planner — for `line_range`
-anchors it matches what you sent, for `unique_text` it tells you which
-line(s) the text was found at.
-
-### `rejected[]`
-
-One entry per op the user rejected during hunk review:
-
-```
-{ op_index, kind, path, range, reason: "rejected" | "partially_rejected" | "cancelled" }
-```
-
-| `reason`              | Meaning                                                  |
-| --------------------- | -------------------------------------------------------- |
-| `rejected`            | User explicitly rejected the hunk(s) for this op.        |
-| `partially_rejected`  | The op produced multiple hunks; some accepted, some not. |
-| `cancelled`           | User closed the review session before deciding.          |
-
-### `failed[]`
-
-One entry per op the engine refused to apply. Carries the failure
-reason and the data the LLM needs to recover. See
-[Errors and recovery](#errors-and-recovery) for the full taxonomy.
+`rejected[]` entries carry `reason`: `rejected` (the user rejected the op's hunks), `partially_rejected` (some hunks accepted, some not) or `cancelled` (the review closed before deciding).
+`failed[]` entries carry a `reason` from [Errors and recovery](#errors-and-recovery), a `message`, a `hint`, and reason-specific fields: `candidates` (`{ lines, text }`, the matched line's text cut at 120 bytes) and `total_matches` for `anchor_ambiguous`, `live_fingerprint` for `stale_fingerprint`, `conflict_op` / `conflict_lines` / `conflict_ops` for `range_conflict`.
+The request's own `anchor` and `baseline_fingerprint` are not echoed back.
 
 ### `files[]`
 
-One entry per file the batch touched:
+A file appears only when it has something to add to the entries:
 
 ```
 {
-  path:          string,
-  status:        "completed" | "cancelled" | "no_changes" | "precondition_failed",
-  cancel_reason: string?,
-  ui_summary:    string?,     // mcphub's human-readable per-file summary
-  diagnostics:   [ Diagnostic, ... ],
+  file:              string,
+  status:            "cancelled" | "no_changes" | "precondition_failed"?,  // omitted when completed
+  cancel_reason:     string?,
+  ui_summary:        string?,     // only when the review rejected something
+  diagnostics:       [ Diagnostic, ... ]?,
+  diagnostic_counts: { errors, warnings }?,  // whole-file, omitted when both are 0
 }
 ```
 
-`diagnostics` is the structured LSP-diagnostic view for the file at
-completion time. Empty array means "collected, nothing to report"; the
-field is never absent (always `[]`, not `null`).
-
+`diagnostics` are the LSP diagnostics of every severity within 10 lines of an edited range, read after a per-LSP wait (300 ms for lua_ls, 5000 ms for metals, etc.) so the server has time to publish post-write findings.
 Each `Diagnostic`:
 
 ```
@@ -521,15 +494,9 @@ Each `Diagnostic`:
 }
 ```
 
-The default severity threshold is `WARN` — `HINT` and `INFO` are
-filtered out. Diagnostics are read after a per-LSP wait (300ms for
-lua_ls, 5000ms for metals, etc.) so the language server has time to
-publish post-write findings.
-
 ### `warnings[]`
 
-Non-fatal issues — unused `contents` labels, `indent: detect`
-fallbacks, etc. The batch still applies; warnings are informational.
+Non-fatal issues — unused `contents` labels, `indent: detect` fallbacks, etc. The batch still applies; warnings are informational.
 
 ## Errors and recovery
 
@@ -538,11 +505,10 @@ suggests a specific recovery action.
 
 ### Schema and validation
 
-Every schema-level failure surfaces with top-level `reason: 'schema_invalid'`
-and a `sub_reason` carrying the specific taxonomy below. Schema errors
-are detected before any file is touched, so no partial state can leak.
+Every schema-level failure surfaces with its specific `reason` from the table below and a `field` naming the offending JSON path (`ops[0].anchor`).
+Schema errors are detected before any file is touched, so no partial state can leak.
 
-| `sub_reason`                  | Meaning                                                              |
+| `reason`                      | Meaning                                                              |
 | ----------------------------- | -------------------------------------------------------------------- |
 | `missing_field`               | A required field is absent.                                          |
 | `wrong_type`                  | A field has the wrong JSON type.                                     |
@@ -559,9 +525,9 @@ are detected before any file is touched, so no partial state can leak.
 | `unsupported_op_kind`         | `kind` is a v2 value (`rename_symbol`, `lsp_code_action`) not yet implemented. |
 | `unsupported_anchor_kind`     | `anchor.by` is a v2 value (`treesitter`, `lsp_symbol`) not yet implemented. |
 
-Each entry also carries `message`, `hint`, `expected`, and `got`
-fields so the LLM can correct without guessing. Recovery is the same
-for every sub-reason: fix the structural error and resubmit.
+Each entry also carries `message`, `hint`, `expected`, and `got` fields so the LLM can correct without guessing.
+Recovery is the same for every one of these reasons: fix the structural error and resubmit.
+The engine itself reports these as `reason: "schema_invalid"` with a `sub_reason`; the wire format promotes the `sub_reason`.
 
 ### Anchor resolution
 
@@ -574,7 +540,7 @@ for every sub-reason: fix the structural error and resubmit.
 
 | `reason`              | Meaning                                                    | Recovery                                                                    |
 | --------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `stale_fingerprint`   | The file changed between your read and your apply.         | The entry carries `live_fingerprint` (the current hash) and `live_content` (the current bytes). Re-plan against `live_content` and resubmit with `baseline_fingerprint = live_fingerprint`. |
+| `stale_fingerprint`   | The file changed between your read and your apply.         | The entry carries `live_fingerprint` (the current hash) but deliberately not the content, which used to be echoed once per stale op. Re-read the file, or just the part you are editing, and replan. |
 | `io_error`            | Could not load the file (path doesn't exist, not readable, etc.). | Verify the path. If you intended to create a new file, use `neovim__write_file` instead — `apply_edit` only modifies existing files. |
 | `invalid_range`       | `read_with_fingerprint` was called with `start_line > end_line` (both explicit). | Swap the values, or pick a single-line range with `start_line == end_line`. |
 | `start_after_eof`     | `read_with_fingerprint` was called with a `start_line` past the file's actual end. | The file is shorter than you assumed. Re-read without `start_line` first to learn `total_lines`. The entry carries `total_lines` for the recovery. |

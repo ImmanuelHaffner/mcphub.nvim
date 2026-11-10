@@ -289,7 +289,8 @@ T["a file changed on disk during an earlier review is refused, even when showing
     eq(response.applied[1].path, one)
     eq(#response.failed, 1)
     eq(response.failed[1].reason, "stale_fingerprint")
-    eq(response.failed[1].live_content, "inserted\nX\ndup\nY\ndup\nZ\n")
+    eq(response.failed[1].live_content, nil)
+    eq(response.failed[1].live_fingerprint ~= response.failed[1].baseline_fingerprint, true)
     eq(child.fn.readfile(two), { "inserted", "X", "dup", "Y", "dup", "Z" })
     -- The refused review leaves no window behind.
     eq(child.fn.win_findbuf(child.fn.bufnr(two)), {})

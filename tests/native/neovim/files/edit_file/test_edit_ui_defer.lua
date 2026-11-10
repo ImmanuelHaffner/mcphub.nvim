@@ -343,7 +343,7 @@ T["apply_edit refuses a target edited while its review waited"] = function()
     local response = child.lua_get("_G.probe.await_response()")
     eq(response.status, "failed")
     eq(response.failed[1].reason, "stale_fingerprint")
-    eq(response.failed[1].live_content, "A edited\nB\nC\n")
+    eq(response.failed[1].live_content, nil)
     eq(child.fn.win_findbuf(child.fn.bufnr(path)), {})
     eq(child.fn.readfile(path), { "A", "B", "C" })
 end
@@ -575,10 +575,11 @@ T["stopping the turn cancels the waiting review and the rest of the batch"] = fu
     local not_attempted = {}
     for _, failure in ipairs(response.failed) do
         if failure.reason == "not_attempted" then
-            not_attempted[#not_attempted + 1] = failure.path
+            not_attempted[#not_attempted + 1] = failure.file
         end
     end
-    eq(not_attempted, { paths[2], paths[3] })
+    -- The tool reports files home-relative (`wire.lua`).
+    eq(not_attempted, { child.fn.fnamemodify(paths[2], ":~"), child.fn.fnamemodify(paths[3], ":~") })
     for _, path in ipairs(paths) do
         eq(child.fn.readfile(path), { "A", "B", "C" })
     end
