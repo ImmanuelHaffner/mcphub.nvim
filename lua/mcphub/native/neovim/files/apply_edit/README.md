@@ -491,7 +491,9 @@ A file appears whenever it could be read back, which is nearly always:
 After its review each file is read back from the buffer (`readback.lua`) and diffed against the content the model's `baseline_fingerprint` pins, so format-on-save and concurrent user edits show up too.
 When nothing changed (every op on it failed or was rejected), `fingerprint` is that same value.
 When it changed, the fingerprint comes with `changes` and `excerpts`: together with the model's earlier read they determine the file as it is now, so the model may edit again without re-reading, renumbering by `changes`.
-A fingerprint certifies that the model has seen the file, so when the excerpts would exceed 100 lines both are withheld and `note` asks for a re-read; handing out a fingerprint for unseen content would bless stale line numbers on the next edit.
+Lines the model sent need not be shown back: where a block's lines are found in the file exactly as sent, at the position the earlier blocks' line counts put them, a run of 8 or more keeps its first and last 2 lines and the middle becomes one unnumbered line, `  ⋮	43–50: 8 lines as you sent them`.
+A formatter or the user changing any line of the run puts all of it back on show, since the model has not seen that text.
+A fingerprint certifies that the model has seen the file, so when the excerpts would exceed 100 lines (an omitted run counting as one) both are withheld and `note` asks for a re-read; handing out a fingerprint for unseen content would bless stale line numbers on the next edit.
 
 `diagnostics` are the LSP diagnostics of every severity within 10 lines of an edited range, read after a per-LSP wait (300 ms for lua_ls, 5000 ms for metals, etc.) so the server has time to publish post-write findings.
 Each `Diagnostic`:

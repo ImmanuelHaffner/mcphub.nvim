@@ -310,6 +310,32 @@ local function classify_outcome(blocks, outcome, file_path)
     return applied, rejected
 end
 
+--- The blocks whose lines went into the file, in position order, up to the
+--- first one only partly accepted: past it, where lines sit is unknown.
+---
+--- @param blocks  mcphub.edit.applier.Block[]
+--- @param outcome mcphub.edit.applier.FileOutcome
+--- @return mcphub.edit.applier.Block[]
+local function landed_blocks(blocks, outcome)
+    if outcome.status ~= "completed" and outcome.status ~= "cancelled" then
+        return {}
+    end
+    local sorted = vim.list_slice(blocks)
+    table.sort(sorted, function(x, y)
+        return x.range.start_line < y.range.start_line
+    end)
+    local out = {}
+    for _, block in ipairs(sorted) do
+        local status = outcome.per_block[block.block_id]
+        if status == "partial" then
+            break
+        elseif status == "accepted" or status == "skipped" or (status == nil and outcome.status == "completed") then
+            out[#out + 1] = block
+        end
+    end
+    return out
+end
+
 --------------------------------------------------------------------------------
 -- Public entry: apply_plan
 --------------------------------------------------------------------------------
@@ -474,7 +500,7 @@ function M.apply_plan(plan, opts, drive_file, on_done)
                 diagnostic_counts = outcome.diagnostic_counts or { errors = 0, warnings = 0 },
                 -- The file as it is now, against what the model read; nil
                 -- when it cannot be read back. See `readback.lua`.
-                readback = readback.compare(path, rec.content),
+                readback = readback.compare(path, rec.content, landed_blocks(blocks, outcome)),
             }
 
             if outcome.status == "precondition_failed" then

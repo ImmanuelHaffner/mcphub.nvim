@@ -316,10 +316,11 @@ end
 --- Prefix each line with its number and a tab, `cat -n` style.
 ---
 --- @param lines string[]
---- @param first integer  Number of `lines[1]`.
+--- @param first integer   Number of `lines[1]`.
+--- @param width integer?  Columns for the number; default: those of the last one.
 --- @return string
-function M.number_lines(lines, first)
-    local fmt = "%" .. #tostring(first + #lines - 1) .. "d\t%s"
+function M.number_lines(lines, first, width)
+    local fmt = "%" .. (width or #tostring(first + #lines - 1)) .. "d\t%s"
     local out = {}
     for i, line in ipairs(lines) do
         out[i] = string.format(fmt, first + i - 1, line)

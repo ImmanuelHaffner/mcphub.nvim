@@ -91,6 +91,35 @@ describe("mcphub.native.neovim.files.apply_edit.wire", function()
             }, out.files)
         end)
 
+        it("replaces an omitted run with one unnumbered line naming it", function()
+            local lines = {}
+            for i = 8, 21 do
+                lines[#lines + 1] = "l" .. i
+            end
+            local out = wire.format({
+                status = "applied",
+                files = {
+                    {
+                        path = HOME_FILE,
+                        status = "completed",
+                        readback = {
+                            fingerprint = "def5678",
+                            changed = true,
+                            changes = {
+                                { old = { start_line = 10, end_line = 9 }, new = { start_line = 10, end_line = 19 } },
+                            },
+                            excerpts = {
+                                { start_line = 8, lines = lines, omitted = { { start_line = 12, end_line = 17 } } },
+                            },
+                        },
+                    },
+                },
+            })
+            assert.are.same({
+                " 8\tl8\n 9\tl9\n10\tl10\n11\tl11\n ⋮\t12–17: 6 lines as you sent them\n18\tl18\n19\tl19\n20\tl20\n21\tl21",
+            }, out.files[1].excerpts)
+        end)
+
         it("offers a fingerprint for a file the model has seen as it is now", function()
             local changed = {
                 fingerprint = "def5678",

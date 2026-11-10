@@ -8,12 +8,12 @@ local readback = require("mcphub.native.neovim.files.apply_edit.readback")
 local SEVEN = "a\nb\nc\nd\ne\nf\ng\n"
 
 --- Write `after` to a fresh file and compare it with `before`.
-local function compare(before, after)
+local function compare(before, after, landed)
     local path = vim.fn.tempname()
     local f = assert(io.open(path, "wb"))
     f:write(after)
     f:close()
-    local rb = readback.compare(path, before)
+    local rb = readback.compare(path, before, landed)
     local bufnr = vim.fn.bufnr(path)
     if bufnr > 0 then
         vim.api.nvim_buf_delete(bufnr, { force = true })
@@ -57,6 +57,67 @@ describe("mcphub.native.neovim.files.apply_edit.readback", function()
         readback.MAX_EXCERPT_LINES = cap
         assert.is.equal(1, #rb.changes)
         assert.is_nil(rb.excerpts)
+    end)
+
+    describe("omitting lines the model sent", function()
+        --- The lines `L1..Ln`, in a fresh table.
+        local function sent(n)
+            local out = {}
+            for i = 1, n do
+                out[i] = "L" .. i
+            end
+            return out
+        end
+        local function text(lines)
+            return table.concat(lines, "\n") .. "\n"
+        end
+        local function insert_before(line, lines)
+            return { range = { start_line = line, end_line = line - 1 }, replace_lines = lines }
+        end
+
+        it("keeps the ends of a long run and omits its middle", function()
+            local after = text(vim.list_extend({ "a", "b", "c" }, vim.list_extend(sent(10), { "d", "e" })))
+            local rb = compare("a\nb\nc\nd\ne\n", after, { insert_before(4, sent(10)) })
+            assert.are.same({ { start_line = 6, end_line = 11 } }, rb.excerpts[1].omitted)
+            assert.is.equal(2, rb.excerpts[1].start_line)
+            assert.is.equal(14, #rb.excerpts[1].lines)
+        end)
+
+        it("shows a run too short to save a line", function()
+            local after = text(vim.list_extend({ "a" }, vim.list_extend(sent(7), { "b" })))
+            local rb = compare("a\nb\n", after, { insert_before(2, sent(7)) })
+            assert.is_nil(rb.excerpts[1].omitted)
+        end)
+
+        it("shows the whole run when a line of it did not land as sent", function()
+            local landed = sent(10)
+            landed[5] = "L5 reformatted"
+            local after = text(vim.list_extend({ "a" }, vim.list_extend(landed, { "b" })))
+            local rb = compare("a\nb\n", after, { insert_before(2, sent(10)) })
+            assert.is_nil(rb.excerpts[1].omitted)
+        end)
+
+        it("finds a later run past the lines an earlier block added and removed", function()
+            local before = text({ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j" })
+            local after = text(vim.list_extend({ "a", "B1", "B2", "B3", "c", "d", "e", "f", "g", "h" }, sent(9)))
+            local landed = {
+                { range = { start_line = 2, end_line = 2 }, replace_lines = { "B1", "B2", "B3" } },
+                { range = { start_line = 9, end_line = 10 }, replace_lines = sent(9) },
+            }
+            local rb = compare(before, after, landed)
+            assert.is.equal(2, #rb.excerpts)
+            assert.is_nil(rb.excerpts[1].omitted)
+            assert.are.same({ { start_line = 13, end_line = 17 } }, rb.excerpts[2].omitted)
+        end)
+
+        it("counts an omitted run as one line against the cap", function()
+            local cap = readback.MAX_EXCERPT_LINES
+            readback.MAX_EXCERPT_LINES = 10
+            local after = text(vim.list_extend({ "a" }, vim.list_extend(sent(20), { "b" })))
+            local rb = compare("a\nb\n", after, { insert_before(2, sent(20)) })
+            readback.MAX_EXCERPT_LINES = cap
+            assert.are.same({ { start_line = 4, end_line = 19 } }, rb.excerpts[1].omitted)
+        end)
     end)
 
     it("cannot read back a file that is gone", function()

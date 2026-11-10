@@ -518,6 +518,28 @@ describe("mcphub.native.neovim.files.apply_edit.engine.apply read-back", functio
         cleanup_fixture(path, bufnr)
     end)
 
+    it("omits the middle of a long run of lines that landed as sent", function()
+        local path, bufnr, fp = fixture_file({ "one", "two" })
+        local sent = {}
+        for i = 1, 10 do
+            sent[i] = "L" .. i
+        end
+        local rb = await_apply({
+            ops = {
+                {
+                    kind = "insert",
+                    path = path,
+                    baseline_fingerprint = fp,
+                    anchor = { by = "after", of = { by = "line_range", start = 1, ["end"] = 1 } },
+                    content = table.concat(sent, "\n"),
+                    indent = "preserve",
+                },
+            },
+        }).files[1].readback
+        assert.are.same({ { start_line = 4, end_line = 9 } }, rb.excerpts[1].omitted)
+        cleanup_fixture(path, bufnr)
+    end)
+
     it("notes that nothing was applied when planning fails", function()
         local path, bufnr, fp = fixture_file({ "one", "two" })
         local input = replace_first(path, fp)

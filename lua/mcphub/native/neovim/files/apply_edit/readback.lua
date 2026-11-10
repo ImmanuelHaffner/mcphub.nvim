@@ -13,6 +13,12 @@
 --- earlier read, those show it the file as it is now. When the excerpts
 --- would be too long, both are withheld and the model re-reads.
 ---
+--- Lines the model sent and that landed exactly as sent need not be shown
+--- again: the middle of a long run of them is omitted from the excerpt
+--- (`omitted`), keeping its first and last `KEEP` lines. Whether they landed
+--- is checked against the file, so a formatter or the user rewriting any of
+--- them puts the whole run back on show.
+---
 --- @module "mcphub.native.neovim.files.apply_edit.readback"
 
 local file_record = require("mcphub.native.neovim.files.apply_edit.file_record")
@@ -23,8 +29,14 @@ local M = {}
 --- Unchanged lines shown on each side of a change.
 M.CONTEXT = 2
 
---- Most excerpt lines returned per file. Beyond it the excerpts, and with
---- them the fingerprint, are withheld: the model re-reads instead.
+--- Lines of a sent run kept on show at each end, and the fewest worth
+--- replacing with a marker: a run is cut only from `2 * KEEP + MIN_OMITTED` lines.
+M.KEEP = 2
+M.MIN_OMITTED = 4
+
+--- Most excerpt lines returned per file, an omitted run counting as one. Beyond
+--- it the excerpts, and with them the fingerprint, are withheld: the model
+--- re-reads instead.
 M.MAX_EXCERPT_LINES = 100
 
 --- @class mcphub.edit.Readback
@@ -33,9 +45,10 @@ M.MAX_EXCERPT_LINES = 100
 --- @field changes     { old: mcphub.edit.ResolvedRange, new: mcphub.edit.ResolvedRange }[]?
 ---                    Present when changed. Zero-width ranges `{ N, N-1 }` mark an
 ---                    insertion (in `old`) or a deletion (in `new`) before line N.
---- @field excerpts    { start_line: integer, lines: string[] }[]?
----                    The changed regions of the file now, with context. Absent when
----                    unchanged or over `MAX_EXCERPT_LINES`.
+--- @field excerpts    { start_line: integer, lines: string[], omitted: mcphub.edit.ResolvedRange[]? }[]?
+---                    The changed regions of the file now, with context, and the runs
+---                    within them of lines the model sent that it need not see again.
+---                    Absent when unchanged or over `MAX_EXCERPT_LINES`.
 
 --- `vim.diff` gives a zero count's start as the line *after which* the change sits.
 local function hunk_range(start, count)
@@ -55,15 +68,53 @@ local function split_lines(content)
     return lines
 end
 
+--- Where the lines of each landed block sit now, for those found there exactly
+--- as sent. A block's position is its range shifted by the line count every
+--- earlier block added or removed.
+---
+--- @param landed mcphub.edit.applier.Block[]  In position order.
+--- @param lines  string[]  The file now.
+--- @return mcphub.edit.ResolvedRange[]
+local function sent_runs(landed, lines)
+    local runs, offset = {}, 0
+    for _, b in ipairs(landed) do
+        local first, n = b.range.start_line + offset, #b.replace_lines
+        if n > 0 and vim.deep_equal(vim.list_slice(lines, first, first + n - 1), b.replace_lines) then
+            runs[#runs + 1] = { start_line = first, end_line = first + n - 1 }
+        end
+        offset = offset + n - (b.range.end_line - b.range.start_line + 1)
+    end
+    return runs
+end
+
+--- The parts of `runs` to omit from the excerpt `[lo, hi]`.
+---
+--- @param runs mcphub.edit.ResolvedRange[]
+--- @param lo   integer
+--- @param hi   integer
+--- @return mcphub.edit.ResolvedRange[]
+local function omissions(runs, lo, hi)
+    local out = {}
+    for _, r in ipairs(runs) do
+        local first = math.max(r.start_line, lo) + M.KEEP
+        local last = math.min(r.end_line, hi) - M.KEEP
+        if last - first + 1 >= M.MIN_OMITTED then
+            out[#out + 1] = { start_line = first, end_line = last }
+        end
+    end
+    return out
+end
+
 --- The diff from what the model read to what is there now, and excerpts of
 --- the result: the diff fully determines the new file from the old, so a
 --- model holding both has in effect seen the file as it is now.
 ---
 --- @param before string
 --- @param after  string
+--- @param landed mcphub.edit.applier.Block[]
 --- @return table changes
 --- @return table? excerpts
-local function diff(before, after)
+local function diff(before, after, landed)
     local changes, windows = {}, {}
     for _, h in ipairs(vim.diff(before, after, { result_type = "indices" })) do
         local old, new = hunk_range(h[1], h[2]), hunk_range(h[3], h[4])
@@ -78,12 +129,21 @@ local function diff(before, after)
     end
 
     local lines = split_lines(after)
+    local runs = sent_runs(landed, lines)
     local excerpts, total = {}, 0
     for _, w in ipairs(windows) do
         local lo, hi = math.max(w[1], 1), math.min(w[2], #lines)
         if lo <= hi then
-            excerpts[#excerpts + 1] = { start_line = lo, lines = vim.list_slice(lines, lo, hi) }
+            local excerpt = { start_line = lo, lines = vim.list_slice(lines, lo, hi) }
             total = total + hi - lo + 1
+            local omitted = omissions(runs, lo, hi)
+            if #omitted > 0 then
+                excerpt.omitted = omitted
+                for _, o in ipairs(omitted) do
+                    total = total - (o.end_line - o.start_line)
+                end
+            end
+            excerpts[#excerpts + 1] = excerpt
         end
     end
     if total > M.MAX_EXCERPT_LINES then
@@ -94,8 +154,10 @@ end
 
 --- @param path   string  Absolute path.
 --- @param before string  The content the planner located the ops in.
+--- @param landed mcphub.edit.applier.Block[]?  The blocks applied to it, in position order, whose lines
+---                       may be omitted from the excerpts where they are found as sent.
 --- @return mcphub.edit.Readback?  nil when the file cannot be read back.
-function M.compare(path, before)
+function M.compare(path, before, landed)
     if vim.fn.filereadable(path) ~= 1 then
         return nil
     end
@@ -105,7 +167,7 @@ function M.compare(path, before)
     end
     local out = { fingerprint = fingerprint.compute(rec.content), changed = rec.content ~= before }
     if out.changed then
-        out.changes, out.excerpts = diff(before, rec.content)
+        out.changes, out.excerpts = diff(before, rec.content, landed or {})
     end
     return out
 end

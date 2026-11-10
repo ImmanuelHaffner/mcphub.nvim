@@ -135,6 +135,34 @@ local function warning_entries(list)
     end, list)
 end
 
+--- Number an excerpt like a read, each omitted run as one unnumbered line naming it.
+--- @param e { start_line: integer, lines: string[], omitted: mcphub.edit.ResolvedRange[]? }
+--- @return string
+local function render_excerpt(e)
+    local last = e.start_line + #e.lines - 1
+    local width = #tostring(last)
+    local parts, from = {}, e.start_line
+    local function number_upto(l)
+        if l >= from then
+            local slice = vim.list_slice(e.lines, from - e.start_line + 1, l - e.start_line + 1)
+            parts[#parts + 1] = edit_read.number_lines(slice, from, width)
+        end
+    end
+    for _, o in ipairs(e.omitted or {}) do
+        number_upto(o.start_line - 1)
+        parts[#parts + 1] = string.format(
+            "%s⋮\t%d–%d: %d lines as you sent them",
+            string.rep(" ", width - 1),
+            o.start_line,
+            o.end_line,
+            o.end_line - o.start_line + 1
+        )
+        from = o.end_line + 1
+    end
+    number_upto(last)
+    return table.concat(parts, "\n")
+end
+
 --- A per-file entry, or nil when it would say nothing `applied[]` does not.
 --- @param f table
 --- @return table?
@@ -166,9 +194,7 @@ local function file_entry(f)
                 return { was = M.lines(c.old), now = M.lines(c.new) }
             end, rb.changes)
             if #rb.excerpts > 0 then
-                out.excerpts = vim.tbl_map(function(e)
-                    return edit_read.number_lines(e.lines, e.start_line)
-                end, rb.excerpts)
+                out.excerpts = vim.tbl_map(render_excerpt, rb.excerpts)
             end
         else
             out.note = "changed too much to show here; re-read it before editing it again"

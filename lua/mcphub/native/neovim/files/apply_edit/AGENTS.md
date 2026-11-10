@@ -369,7 +369,10 @@ turns every block of an empty file into one replacing its phantom line.
 content the model's fingerprint pinned and returns the new fingerprint,
 the changed regions and their excerpts (withheld past 100 lines). A
 fingerprint is only handed out with content showing the file as it is
-now, because a bare one would bless stale line numbers.
+now, because a bare one would bless stale line numbers. The applier
+passes the blocks that landed (`landed_blocks`); a long run of a block's
+lines found verbatim at its expected position is marked `omitted`, and
+`wire.lua` renders it as one unnumbered `⋮` line.
 
 **`wire.lua`** — reshapes the engine response for the model at the MCP
 boundary only: 0-based `op`, `file` (home-relative) or `field` instead
