@@ -31,6 +31,20 @@ local function slurp(path)
     return content
 end
 
+--- @param path string
+--- @param value table
+local function write_json(path, value)
+    vim.fn.writefile({ vim.json.encode(value) }, path)
+end
+
+--- @param path string
+--- @return table
+local function read_json(path)
+    return vim.json.decode(slurp(path))
+end
+
+local saved
+
 local T = new_set({
     hooks = {
         pre_case = function()
@@ -111,6 +125,72 @@ T["files"]["an existing overlay is left untouched on refresh"] = function()
     eq(config_manager.refresh_config(), true)
     eq(slurp(overlay), content .. "\n")
     eq(State.config_files_cache[overlay].mcpServers.x.command, "true")
+end
+
+T["sources"] = new_set({
+    hooks = {
+        pre_case = function()
+            saved = {
+                config = State.config,
+                servers = State.server_state.servers,
+                native_servers = State.server_state.native_servers,
+            }
+            write_json(tmp("global.json"), {
+                mcpServers = { g = { command = "true" }, both = { command = "global" } },
+            })
+            write_json(tmp("overlay.json"), {
+                mcpServers = { x = { command = "true", disabled = true }, both = { command = "overlay" } },
+            })
+            State.config = { config = tmp("global.json") }
+            State.server_state.servers = {}
+            State.server_state.native_servers = {}
+            State.current_hub = { config_files = { tmp("global.json"), tmp("overlay.json") } }
+            config_manager.refresh_config()
+        end,
+        post_case = function()
+            State.config = saved.config
+            State.server_state.servers = saved.servers
+            State.server_state.native_servers = saved.native_servers
+        end,
+    },
+})
+
+T["sources"]["an overlay-only name is written to the overlay"] = function()
+    local global = slurp(tmp("global.json"))
+    eq(config_manager.update_server_config("x", { disabled = false }), true)
+    eq(read_json(tmp("overlay.json")).mcpServers.x, { command = "true", disabled = false })
+    eq(slurp(tmp("global.json")), global)
+end
+
+T["sources"]["an unknown name is written to the global config"] = function()
+    local overlay = slurp(tmp("overlay.json"))
+    eq(config_manager.update_server_config("new", { command = "true" }), true)
+    eq(read_json(tmp("global.json")).mcpServers.new, { command = "true" })
+    eq(slurp(tmp("overlay.json")), overlay)
+end
+
+T["sources"]["a name in both files resolves to the later one"] = function()
+    eq(config_manager.get_config_source("both"), tmp("overlay.json"))
+    eq(config_manager.get_server_config("both").command, "overlay")
+end
+
+T["sources"]["an explicit config_source wins"] = function()
+    eq(config_manager.update_server_config("x", { command = "true" }, { config_source = tmp("global.json") }), true)
+    eq(read_json(tmp("global.json")).mcpServers.x, { command = "true" })
+    eq(read_json(tmp("overlay.json")).mcpServers.x.disabled, true)
+end
+
+T["sources"]["get_server_config finds an overlay-only entry"] = function()
+    eq(config_manager.get_server_config("x"), { command = "true", disabled = true })
+    eq(config_manager.get_server_config("missing"), nil)
+end
+
+T["sources"]["starting an overlay-only server enables it in the overlay"] = function()
+    local hub = helpers.setup_plugin()
+    local global = slurp(tmp("global.json"))
+    hub:start_mcp_server("x")
+    eq(read_json(tmp("overlay.json")).mcpServers.x.disabled, false)
+    eq(slurp(tmp("global.json")), global)
 end
 
 return T

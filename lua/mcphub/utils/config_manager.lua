@@ -28,6 +28,23 @@ local function find_server_by_name(server_name, from_non_native)
     return nil
 end
 
+--- The active config file that defines `server_name`, for a server the hub has not reported yet.
+---
+--- A server just written to an overlay is unknown to the hub until its file watcher catches up, and without
+--- this lookup any update in the meantime — starting it, say — would land in the global file as a stub
+--- without `command`, which fails validation of the whole config.  Later files win, as in mcp-hub's merge.
+--- @param server_name string
+--- @return string|nil
+local function find_source_in_files(server_name)
+    for _, path in ipairs(M.get_active_config_files(true)) do
+        local file_config = M.get_file_config(path)
+        if file_config and file_config.mcpServers and file_config.mcpServers[server_name] ~= nil then
+            return path
+        end
+    end
+    return nil
+end
+
 --- Read and parse a config file
 --- @param file_path string Path to the config file
 --- @return table|nil config Parsed config or nil on error
@@ -248,8 +265,11 @@ function M.get_config_source(server)
         -- Find server in active servers list
         server_obj = find_server_by_name(server)
         if not server_obj then
-            log.debug("ConfigManager: Server not found: " .. server)
-            return nil
+            local source = find_source_in_files(server)
+            if not source then
+                log.debug("ConfigManager: Server not found: " .. server)
+            end
+            return source
         end
     else
         -- server is an object
@@ -268,13 +288,19 @@ function M.get_server_config(server, from_non_native)
     if type(server) == "string" then
         -- Find server in active servers list to get config_source
         local server_obj = find_server_by_name(server, from_non_native)
-        if not server_obj then
-            log.debug("ConfigManager: Server not found: " .. server)
-            return nil
-        end
         server_name = server
-        config_source = server_obj.config_source
-        is_native = server_obj.is_native or false
+        if server_obj then
+            config_source = server_obj.config_source
+            is_native = server_obj.is_native or false
+        else
+            -- Native servers are always known locally, so an unreported one is a regular server.
+            config_source = find_source_in_files(server)
+            if not config_source then
+                log.debug("ConfigManager: Server not found: " .. server)
+                return nil
+            end
+            is_native = false
+        end
     else
         -- server is an object
         server_name = server.name
@@ -319,8 +345,9 @@ function M.update_server_config(server, config, options)
         -- Use {} so that we can add a new server
         local server_obj = find_server_by_name(server) or {}
         server_name = server
-        -- For servers without config_source, or new servers use global config
-        config_source = server_obj.config_source or State.config.config
+        -- Servers the hub has not reported yet live wherever a config file already defines them;
+        -- genuinely new servers go to the global config.
+        config_source = server_obj.config_source or find_source_in_files(server) or State.config.config
         is_native = server_obj.is_native or false
     else
         server_name = server.name
