@@ -116,7 +116,9 @@ Absolute path to the MCP Servers configuration file. The plugin will create this
 
 Default: `{}`
 
-Extra config files the hub reads after `config`, in global mode only (workspace mode ignores them). Each entry is a path or a table `{ path = ... }`; paths are expanded. Every file is passed to `mcp-hub` as one more `--config`, so the hub merges them in order — a later file wins per server name, replacing the earlier entry wholesale — and watches each of them. A missing file is created with an empty `mcpServers`. Servers read from an overlay keep that file as their `config_source`, so toggling or editing them from the UI writes back to the overlay.
+Extra config files the hub reads after `config`, in global mode only (workspace mode ignores them). Each entry is a path or a table `{ path = ..., ephemeral = ... }`; paths are expanded. Every file is passed to `mcp-hub` as one more `--config`, so the hub merges them in order — a later file wins per server name, replacing the earlier entry wholesale — and watches each of them. A missing file is created with an empty `mcpServers`. Servers read from an overlay keep that file as their `config_source`, so toggling or editing them from the UI writes back to the overlay.
+
+With `ephemeral = true`, every server in that file is set `disabled = true` just before this Neovim spawns a new `mcp-hub` process, so the fresh hub starts none of them; everything else in the entries is kept. Connecting to a hub that is already running leaves the file alone. Use it when whoever writes the overlay re-enables what it needs once the hub is ready, so that servers left enabled by an earlier session do not come back on their own.
 
 Use an overlay for servers that some other process writes, for example per-project servers registered at runtime, so that a tool which replaces `config` wholesale (a dotfiles install) leaves them alone.
 

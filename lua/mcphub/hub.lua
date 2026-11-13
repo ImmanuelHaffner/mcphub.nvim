@@ -262,6 +262,18 @@ function MCPHub:_build_cmd_args(context)
     return args
 end
 
+--- Disable every server in the `ephemeral` overlays the hub in `context` reads, so a hub this Neovim is about
+--- to spawn starts none of them; whoever wants one re-enables it once the hub is ready.  Connecting to a
+--- running hub never comes here, so servers another Neovim relies on are left alone.
+--- @param context MCPHub.JobContext
+function MCPHub:_reset_ephemeral_overlays(context)
+    for _, overlay in ipairs(self:_config_overlays()) do
+        if overlay.ephemeral and vim.tbl_contains(context.config_files or {}, overlay.path) then
+            config_manager.disable_all_servers(overlay.path)
+        end
+    end
+end
+
 --- Start server with resolved context
 --- @param context MCPHub.JobContext Context information from resolve_context
 function MCPHub:_start_server_with_context(context)
@@ -269,6 +281,8 @@ function MCPHub:_start_server_with_context(context)
     if self.server_job then
         self.server_job = nil
     end
+
+    self:_reset_ephemeral_overlays(context)
 
     -- Resolve global environment variables
     local resolved_global_env = self:_resolve_global_env(context)

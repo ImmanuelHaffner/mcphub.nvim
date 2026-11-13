@@ -11,6 +11,7 @@ local SHUTDOWN_DELAY = 5 * 60 * 1000 -- 5 minutes
 
 ---@class MCPHub.ConfigOverlay
 ---@field path string Absolute path of an extra config file, created when missing
+---@field ephemeral? boolean Disable every server in this file before spawning a new hub
 
 ---@class MCPHub.Config
 local defaults = {

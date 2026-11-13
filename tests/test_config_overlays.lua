@@ -193,4 +193,62 @@ T["sources"]["starting an overlay-only server enables it in the overlay"] = func
     eq(slurp(tmp("global.json")), global)
 end
 
+T["ephemeral"] = new_set()
+
+local SERVERS = {
+    a = { command = "fff-mcp", args = { "/r/a" }, _project_root = "/r/a" },
+    b = { command = "fff-mcp", args = { "/r/b" }, disabled = false },
+}
+
+--- A hub with an ephemeral overlay `e.json` and a plain overlay `p.json`, both holding `SERVERS`.
+local function ephemeral_hub()
+    write_json(tmp("e.json"), { mcpServers = SERVERS })
+    write_json(tmp("p.json"), { mcpServers = SERVERS })
+    return helpers.setup_plugin({
+        config_overlays = { { path = tmp("e.json"), ephemeral = true }, tmp("p.json") },
+    })
+end
+
+T["ephemeral"]["disables every server and keeps the rest"] = function()
+    local hub = ephemeral_hub()
+    hub:_reset_ephemeral_overlays(hub:_resolve_global_context())
+
+    local servers = read_json(tmp("e.json")).mcpServers
+    eq(servers.a, vim.tbl_extend("force", SERVERS.a, { disabled = true }))
+    eq(servers.b, vim.tbl_extend("force", SERVERS.b, { disabled = true }))
+    eq(State.config_files_cache[tmp("e.json")].mcpServers.a.disabled, true)
+end
+
+T["ephemeral"]["leaves other config files untouched"] = function()
+    local hub = ephemeral_hub()
+    local plain, global = slurp(tmp("p.json")), slurp(GLOBAL)
+    hub:_reset_ephemeral_overlays(hub:_resolve_global_context())
+
+    eq(slurp(tmp("p.json")), plain)
+    eq(slurp(GLOBAL), global)
+end
+
+T["ephemeral"]["ignores overlays the hub does not read"] = function()
+    local hub = ephemeral_hub()
+    local before = slurp(tmp("e.json"))
+    hub:_reset_ephemeral_overlays({ config_files = { GLOBAL } })
+    eq(slurp(tmp("e.json")), before)
+end
+
+T["ephemeral"]["does not rewrite a file that is already all disabled"] = function()
+    local hub = ephemeral_hub()
+    write_json(tmp("e.json"), { mcpServers = { a = { command = "true", disabled = true } } })
+    local before = slurp(tmp("e.json"))
+    hub:_reset_ephemeral_overlays(hub:_resolve_global_context())
+    eq(slurp(tmp("e.json")), before)
+end
+
+T["ephemeral"]["does not rewrite a file that fails to parse"] = function()
+    local hub = ephemeral_hub()
+    vim.fn.writefile({ "{ not json" }, tmp("e.json"))
+    hub:_reset_ephemeral_overlays(hub:_resolve_global_context())
+    eq(slurp(tmp("e.json")), "{ not json\n")
+    eq(config_manager.disable_all_servers(tmp("e.json")), false)
+end
+
 return T

@@ -450,6 +450,42 @@ function M.get_active_config_files(reverse)
     return State.current_hub.config_files
 end
 
+--- Set `disabled = true` on every server in the config file at `file_path`, leaving every other field alone.
+--- The file is only rewritten when something changes, and never when it does not parse.
+--- @param file_path string
+--- @return boolean success
+function M.disable_all_servers(file_path)
+    local file_result = validate_config_file(file_path)
+    if not file_result.ok then
+        log.error("ConfigManager: Not disabling the servers in " .. file_path .. ": " .. file_result.error)
+        return false
+    end
+
+    local file_config = file_result.json
+    local changed = false
+    for _, server_config in pairs(file_config.mcpServers or {}) do
+        if type(server_config) == "table" and server_config.disabled ~= true then
+            server_config.disabled = true
+            changed = true
+        end
+    end
+
+    if changed then
+        local write_success, write_error = write_config_file(file_config, file_path, file_result.original_key)
+        if not write_success then
+            log.error("ConfigManager: " .. write_error)
+            return false
+        end
+    end
+
+    State.config_files_cache = State.config_files_cache or {}
+    State.config_files_cache[file_path] = {
+        mcpServers = file_config.mcpServers or vim.empty_dict(),
+        nativeMCPServers = file_config.nativeMCPServers or vim.empty_dict(),
+    }
+    return true
+end
+
 --- Get the raw config content for a specific file (for UI display)
 --- @param file_path string Path to the config file
 --- @return table|nil config content or nil if not found/invalid
