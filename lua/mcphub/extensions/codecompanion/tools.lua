@@ -2,6 +2,8 @@ local M = {}
 local core = require("mcphub.extensions.codecompanion.core")
 
 local mcphub = require("mcphub")
+local native = require("mcphub.native")
+local prompt_utils = require("mcphub.utils.prompt")
 
 --- Utility functions for naming
 ---@param name string
@@ -18,6 +20,30 @@ local function create_namespaced_tool_name(server_name, tool_name)
     local safe_server_name = make_safe_name(server_name)
     local safe_tool_name = make_safe_name(tool_name)
     return safe_server_name .. "__" .. safe_tool_name
+end
+
+--- A native tool may render its description and input schema from mcphub's
+--- live config (`execute_command` states its memory limit and timeouts), so
+--- re-render them when a chat adds the tool instead of reusing the copy
+--- `register()` took when the server list last changed. Other servers' tools
+--- are plain data, of which that copy already is the latest.
+---@param server_name string
+---@param tool MCPTool The tool as `register()` saw it
+---@return string description
+---@return table parameters
+local function current_definition(server_name, tool)
+    local server = native.is_native_server(server_name)
+    for _, def in ipairs(server and server.capabilities.tools or {}) do
+        if def.name == tool.name then
+            local schema = prompt_utils.get_inputSchema(def)
+            -- As `get_servers()` does, so empty properties encode as a JSON object.
+            if type(schema.properties) == "table" and not next(schema.properties) then
+                schema = vim.tbl_extend("force", schema, { properties = vim.empty_dict() })
+            end
+            return prompt_utils.get_description(def), schema
+        end
+    end
+    return tool.description, tool.inputSchema
 end
 
 --- Create handler for static tools (use_mcp_tool, access_mcp_resource)
@@ -288,6 +314,7 @@ function M.register(opts)
                         hide_in_help_window = true,
                         visible = opts.show_server_tools_in_chat == true,
                         callback = function()
+                            local description, parameters = current_definition(server.name, tool)
                             return {
                                 name = namespaced_tool_name,
                                 cmds = {
@@ -303,8 +330,8 @@ function M.register(opts)
                                     type = "function",
                                     ["function"] = {
                                         name = namespaced_tool_name,
-                                        description = tool.description,
-                                        parameters = tool.inputSchema,
+                                        description = description,
+                                        parameters = parameters,
                                     },
                                 },
                             }
@@ -318,7 +345,6 @@ function M.register(opts)
     end
 
     -- Create server groups
-    local prompt_utils = require("mcphub.utils.prompt")
     for safe_server_name, server_data in pairs(server_tools) do
         local tool_names = server_data.tool_names
         local server_name = server_data.server_name

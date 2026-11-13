@@ -173,6 +173,17 @@ T["on_job"]["hands the job to the chat's progress line"] = function()
     eq(attached[1] == job, true)
 end
 
+T["schema"] = new_set()
+
+T["schema"]["follows config changed after register"] = function()
+    tools.register({})
+    State.config.builtin_tools = { execute_command = { memory_limit = 3 * 1024 ^ 3, timeout_default = 45 } }
+    local config = package.loaded["codecompanion.config"]
+    local schema = config.interactions.chat.tools["neovim__execute_command"].callback().schema["function"]
+    eq(schema.description:match("exceeds 3 GiB%.") ~= nil, true)
+    eq(schema.parameters.properties.timeout.description:match("Default: 45%.") ~= nil, true)
+end
+
 T["cmd_string"] = new_set()
 
 T["cmd_string"]["labels an individual tool with its command"] = function()
