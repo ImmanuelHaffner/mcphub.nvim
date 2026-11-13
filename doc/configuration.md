@@ -112,6 +112,17 @@ Default: `~/.config/mcphub/servers.json`
 
 Absolute path to the MCP Servers configuration file. The plugin will create this file if it doesn't exist. See [servers.json](/mcp/servers_json) page to see how `servers.json` should look like, how to safely add it to source control and more
 
+### config_overlays
+
+Default: `{}`
+
+Extra config files the hub reads after `config`, in global mode only (workspace mode ignores them). Each entry is a path or a table `{ path = ... }`; paths are expanded. Every file is passed to `mcp-hub` as one more `--config`, so the hub merges them in order — a later file wins per server name, replacing the earlier entry wholesale — and watches each of them. A missing file is created with an empty `mcpServers`. Servers read from an overlay keep that file as their `config_source`, so toggling or editing them from the UI writes back to the overlay.
+
+Use an overlay for servers that some other process writes, for example per-project servers registered at runtime, so that a tool which replaces `config` wholesale (a dotfiles install) leaves them alone.
+
+Changing this list restarts a running hub once, because the hub's recorded config files no longer match.
+
+
 
 ### port
 

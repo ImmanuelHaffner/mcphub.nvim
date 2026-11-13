@@ -150,6 +150,25 @@ function MCPHub:_resolve_workspace_context()
     }
 end
 
+--- `config_overlays` normalised: plain strings become `{ path = s }` and every path is expanded, so it matches
+--- the `config_source` mcp-hub reports for servers read from it.
+--- @return MCPHub.ConfigOverlay[]
+function MCPHub:_config_overlays()
+    local overlays = {}
+    for _, overlay in ipairs((self.setup_opts or {}).config_overlays or {}) do
+        if type(overlay) == "string" then
+            overlay = { path = overlay }
+        end
+        if type(overlay) == "table" and type(overlay.path) == "string" and overlay.path ~= "" then
+            local path = vim.fs.normalize(vim.fn.expand(overlay.path))
+            table.insert(overlays, vim.tbl_extend("force", overlay, { path = path }))
+        else
+            log.warn("Ignoring invalid config_overlays entry: " .. vim.inspect(overlay))
+        end
+    end
+    return overlays
+end
+
 --- Resolve global context (original behavior)
 --- @return MCPHub.JobContext Global context
 function MCPHub:_resolve_global_context()
@@ -157,10 +176,14 @@ function MCPHub:_resolve_global_context()
     local port = self.setup_opts.port
     -- For global mode, port will always be the one provided in setup_opts, so we can get the existing hub using that
     local existing_hub = workspace_utils.get_workspace_hub_info(port)
+    local config_files = { self.config }
+    for _, overlay in ipairs(self:_config_overlays()) do
+        table.insert(config_files, overlay.path)
+    end
     return {
         port = port,
         cwd = cwd,
-        config_files = { self.config },
+        config_files = config_files,
         is_workspace_mode = false,
         workspace_root = cwd,
         existing_hub = existing_hub,
@@ -214,6 +237,31 @@ function MCPHub:_resolve_global_env(context)
     return resolved_global_env
 end
 
+--- Command-line arguments for `mcp-hub` in `context`.
+--- @param context MCPHub.JobContext
+--- @return string[]
+function MCPHub:_build_cmd_args(context)
+    local args = utils.clean_args({
+        self.cmdArgs,
+        "--port",
+        tostring(context.port),
+    })
+
+    -- mcp-hub merges these in order, so a later file wins per server name.
+    for _, config_file in ipairs(context.config_files) do
+        table.insert(args, "--config")
+        table.insert(args, config_file)
+    end
+
+    vim.list_extend(args, {
+        "--auto-shutdown",
+        "--shutdown-delay",
+        self.shutdown_delay or 0,
+        "--watch",
+    })
+    return args
+end
+
 --- Start server with resolved context
 --- @param context MCPHub.JobContext Context information from resolve_context
 function MCPHub:_start_server_with_context(context)
@@ -225,26 +273,7 @@ function MCPHub:_start_server_with_context(context)
     -- Resolve global environment variables
     local resolved_global_env = self:_resolve_global_env(context)
 
-    -- Build command args with config files
-    local args = utils.clean_args({
-        self.cmdArgs,
-        "--port",
-        tostring(context.port),
-    })
-
-    -- Add all config files (global first, then project-specific)
-    for _, config_file in ipairs(context.config_files) do
-        table.insert(args, "--config")
-        table.insert(args, config_file)
-    end
-
-    -- Add other flags
-    vim.list_extend(args, {
-        "--auto-shutdown",
-        "--shutdown-delay",
-        self.shutdown_delay or 0,
-        "--watch",
-    })
+    local args = self:_build_cmd_args(context)
 
     -- Prepare job environment with global env
     local job_env = {}

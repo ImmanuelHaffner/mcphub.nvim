@@ -9,11 +9,18 @@ local SHUTDOWN_DELAY = 5 * 60 * 1000 -- 5 minutes
 ---@field reload_on_dir_changed boolean Whether to listen to DirChanged events to reload workspace config
 ---@field get_port fun(): number | nil Function that determines that returns the port
 
+---@class MCPHub.ConfigOverlay
+---@field path string Absolute path of an extra config file, created when missing
+
 ---@class MCPHub.Config
 local defaults = {
     port = 37373, -- Default port for MCP Hub
     server_url = nil, -- In cases where mcp-hub is hosted somewhere, set this to the server URL e.g `http://mydomain.com:customport` or `https://url_without_need_for_port.com`
     config = vim.fn.expand("~/.config/mcphub/servers.json"), -- Default config location
+    -- Extra config files the hub reads after `config` in global mode; later files win per server name.
+    -- Each entry is a path or a `MCPHub.ConfigOverlay`.
+    ---@type (string|MCPHub.ConfigOverlay)[]
+    config_overlays = {},
     shutdown_delay = SHUTDOWN_DELAY, -- Delay before shutting down the mcp-hub
     mcp_request_timeout = 60000, --Timeout for MCP requests in milliseconds, useful for long running tasks
     ---@type table<string, NativeServerDef>
