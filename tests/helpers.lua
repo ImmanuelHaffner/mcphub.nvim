@@ -43,6 +43,11 @@ Helpers.new_child_neovim = function()
 
     child.setup = function()
         child.restart({ "-u", "scripts/minimal_init.lua" })
+        -- Filetype plugins are not under test, and some need a treesitter parser: since 0.12
+        -- `ftplugin/lua.lua` calls `vim.treesitter.start()` unconditionally, which raises for every
+        -- `.lua` fixture on a Neovim build that bundles no parsers, because `--clean` also keeps the
+        -- user's parser directory off 'runtimepath'.  Detection stays on, so 'filetype' is still set.
+        child.cmd("filetype plugin off")
         child.o.statusline = ""
         child.o.laststatus = 0
         -- Change initial buffer to be readonly. This not only increases execution
