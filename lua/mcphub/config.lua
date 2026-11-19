@@ -115,7 +115,8 @@ local defaults = {
             kill_ladder = { { "sigint", 2000 }, { "sigterm", 3000 } },
             nice = 10, -- CPU niceness of commands, within [0, 19] (anything else is clamped); false: Neovim's priority
             oom_score_adj = 1000, -- Linux only: OOM-killer score of commands, so they go before Neovim; false: unchanged
-            -- RSS of a command's process group, in bytes, above which it is terminated; sampled once a second.
+            -- Memory a command's process group uses, in bytes, above which it is terminated; sampled once a second.
+            -- Counted as summed PSS on Linux, so pages its processes share count once; elsewhere as summed RSS.
             -- "auto": min(25 % of RAM, 8 GiB); false: no limit.
             memory_limit = "auto",
             refresh_ms = 500, -- How often the progress line above a running command's fold is redrawn, in ms

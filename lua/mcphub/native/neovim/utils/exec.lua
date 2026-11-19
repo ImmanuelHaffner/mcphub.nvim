@@ -6,8 +6,8 @@
 --- tail of the output are kept, while the full output is streamed to a log
 --- file in the spill directory. A job is stopped by signalling its whole
 --- process group along an escalation ladder that always ends in SIGKILL.
---- While jobs run, the RSS of each one's process group is sampled once a
---- second, and a group over its memory limit is stopped the same way.
+--- While jobs run, the memory each one's process group uses is sampled once
+--- a second, and a group over its memory limit is stopped the same way.
 local spill = require("mcphub.utils.spill")
 
 local M = {}
@@ -119,10 +119,10 @@ local warned_nice = {}
 --- Ceiling of the "auto" memory limit, which is otherwise a quarter of RAM.
 M.MAX_AUTO_MEMORY_LIMIT = 8 * 1024 * 1024 * 1024
 
---- The RSS in bytes above which the watchdog terminates a job's process
---- group. A positive number is taken as bytes and `false` disables the
---- watchdog; anything else, "auto" included, means a quarter of RAM, but at
---- most `MAX_AUTO_MEMORY_LIMIT`.
+--- The memory use in bytes (see `group_memory`) above which the watchdog
+--- terminates a job's process group. A positive number is taken as bytes and
+--- `false` disables the watchdog; anything else, "auto" included, means a
+--- quarter of RAM, but at most `MAX_AUTO_MEMORY_LIMIT`.
 ---@param limit any
 ---@return number|false bytes
 function M.resolve_memory_limit(limit)
@@ -152,21 +152,56 @@ function M.mem_size(n)
     return ("%.0f B"):format(n)
 end
 
---- RSS per process group from the output of `ps -A -o pgid=,rss=`, whose RSS
---- column is in KiB on Linux and macOS alike. Summing double-counts shared
---- pages, which errs on the side of stopping a command early.
+--- The processes of each process group, from the output of
+--- `ps -A -o pgid=,pid=,rss=`, whose RSS column is in KiB on Linux and macOS
+--- alike.
 ---@param stdout string
----@return table<integer, integer> rss Bytes by process-group id
+---@return table<integer, { pid: integer, rss: integer }[]> groups RSS in bytes, by process-group id
 function M.parse_ps(stdout)
-    local rss = {}
+    local groups = {}
     for line in stdout:gmatch("[^\n]+") do
-        local pgid, kib = line:match("^%s*(%d+)%s+(%d+)")
+        local pgid, pid, kib = line:match("^%s*(%d+)%s+(%d+)%s+(%d+)")
         if pgid then
-            pgid = tonumber(pgid)
-            rss[pgid] = (rss[pgid] or 0) + tonumber(kib) * 1024
+            local procs = groups[tonumber(pgid)] or {}
+            groups[tonumber(pgid)] = procs
+            procs[#procs + 1] = { pid = tonumber(pid), rss = tonumber(kib) * 1024 }
         end
     end
-    return rss
+    return groups
+end
+
+--- A process's proportional set size in bytes, from Linux's
+--- `/proc/<pid>/smaps_rollup`; nil where that cannot be read.
+---@param pid integer
+---@return integer?
+function M.read_pss(pid)
+    local f = io.open(("/proc/%d/smaps_rollup"):format(pid), "r")
+    if not f then
+        return nil
+    end
+    local text = f:read("*a")
+    f:close()
+    local kib = text and text:match("\nPss:%s+(%d+) kB")
+    return kib and tonumber(kib) * 1024
+end
+
+--- The memory a process group uses, in bytes: the sum of its processes' PSS,
+--- which charges a page shared by several processes to each only in part.
+--- Summed RSS would charge it in full to every process that maps it, so the
+--- dozens of workers of a parallel `git checkout`, all mapping the same
+--- packfiles, would add up to many times the memory in use. A process whose
+--- PSS cannot be read (no `smaps_rollup`, as on macOS, or it exited after
+--- `ps` ran) counts with its RSS.
+---@param procs { pid: integer, rss: integer }[]
+---@param read_pss? fun(pid: integer): integer? Defaults to `read_pss`
+---@return integer bytes
+function M.group_memory(procs, read_pss)
+    read_pss = read_pss or M.read_pss
+    local bytes = 0
+    for _, proc in ipairs(procs) do
+        bytes = bytes + (read_pss(proc.pid) or proc.rss)
+    end
+    return bytes
 end
 
 ---@class MCPHub.Exec.Capture
@@ -372,7 +407,7 @@ M.Capture = Capture
 ---@field out_bytes integer Bytes received on stdout and stderr
 ---@field out_lines integer Lines received on stdout and stderr
 ---@field last_output_at? integer `vim.uv.now()` when output last arrived
----@field rss_bytes? integer The process group's RSS at the last sample
+---@field mem_bytes? integer The process group's memory use (see `group_memory`) at the last sample
 
 ---@class MCPHub.Exec.Job
 ---@field id integer `jobstart` id
@@ -393,8 +428,8 @@ M.Capture = Capture
 ---@field last_signal? string Last signal sent to the process group
 ---@field timeout_ms? integer Timeout the job runs under; absent means none
 ---@field _timer? uv.uv_timer_t Pending timeout
----@field memory_limit number|false RSS in bytes above which the watchdog terminates the job; `false`: none
----@field memory_peak? integer RSS of the sample that tripped the watchdog
+---@field memory_limit number|false Memory use in bytes above which the watchdog terminates the job; `false`: none
+---@field memory_peak? integer Memory use of the sample that tripped the watchdog
 
 ---@alias MCPHub.Exec.TerminateReason "timeout" | "cancelled" | "stopped" | "memory"
 
@@ -524,25 +559,27 @@ local SAMPLE_MS = 1000
 ---@type { timer?: uv.uv_timer_t, busy: boolean }
 local sampler = { busy = false }
 
---- Record each running job's RSS from one `ps`, and terminate the jobs over
+--- Record each running job's memory use (see `group_memory`), with the
+--- processes of its group taken from one `ps`, and terminate the jobs over
 --- their memory limit. A tick is skipped while the previous `ps` still runs.
 local function sample()
     if sampler.busy then
         return
     end
     sampler.busy = true
-    local ok = pcall(vim.system, { "ps", "-A", "-o", "pgid=,rss=" }, { text = true }, function(out)
+    local ok = pcall(vim.system, { "ps", "-A", "-o", "pgid=,pid=,rss=" }, { text = true }, function(out)
         -- `terminate` may notify, which a fast event context does not allow.
         vim.schedule(function()
             sampler.busy = false
             if out.code ~= 0 then
                 return
             end
-            local rss = M.parse_ps(out.stdout or "")
+            local groups = M.parse_ps(out.stdout or "")
             for _, job in pairs(M.jobs) do
-                local bytes = rss[job.pid]
-                if bytes then
-                    job.stats.rss_bytes = bytes
+                local procs = groups[job.pid]
+                if procs then
+                    local bytes = M.group_memory(procs)
+                    job.stats.mem_bytes = bytes
                     if job.memory_limit and bytes > job.memory_limit and not job.terminating then
                         job.memory_peak = bytes
                         job:terminate("memory")
@@ -572,7 +609,7 @@ local function stop_sampler_if_idle()
     end
 end
 
---- Whether the RSS sampler's timer is running; for tests.
+--- Whether the memory sampler's timer is running; for tests.
 ---@return boolean
 function M._sampler_active()
     return sampler.timer ~= nil

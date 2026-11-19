@@ -436,13 +436,79 @@ T["memory"] = new_set()
 
 local GiB = 1024 * MiB
 
--- `bytearray(n)` would be calloc'd as untouched zero pages that never count
--- towards RSS; repeating a byte writes every page.
+-- `bytearray(n)` would be calloc'd as untouched zero pages that are never
+-- resident; repeating a byte writes every page.
 local ALLOC_256M = [[python3 -c "x = b'\x01' * (256 * 2**20); import time; time.sleep(30)"]]
 
-T["memory"]["parses ps output into RSS per process group"] = function()
-    eq(exec.parse_ps("  1  100\n 42  200\n 42  300\n"), { [1] = 102400, [42] = 512000 })
+T["memory"]["parses ps output into processes per process group"] = function()
+    eq(exec.parse_ps("  1  10  100\n 42  11  200\n 42  12  300\n"), {
+        [1] = { { pid = 10, rss = 102400 } },
+        [42] = { { pid = 11, rss = 204800 }, { pid = 12, rss = 307200 } },
+    })
     eq(exec.parse_ps(""), {})
+end
+
+T["memory"]["sums PSS, falling back to RSS where it cannot be read"] = function()
+    local pss = { [11] = 50 * 1024 }
+    local procs = { { pid = 11, rss = 204800 }, { pid = 12, rss = 307200 } }
+    eq(
+        exec.group_memory(procs, function(pid)
+            return pss[pid]
+        end),
+        50 * 1024 + 307200
+    )
+end
+
+T["memory"]["reads a process's PSS"] = function()
+    if not vim.uv.fs_stat("/proc/self/smaps_rollup") then
+        MiniTest.skip("no /proc/<pid>/smaps_rollup")
+    end
+    local pss = assert(exec.read_pss(vim.fn.getpid()))
+    local rss = exec.parse_ps(vim.fn.system({ "ps", "-o", "pgid=,pid=,rss=", "-p", tostring(vim.fn.getpid()) }))
+    local _, procs = next(rss)
+    eq(pss > 0 and pss <= procs[1].rss, true)
+    eq(exec.read_pss(-1), nil)
+end
+
+-- Eight children each read every page of one 256 MiB file through `mmap`. Summed
+-- RSS charges the file to each of them, 2 GiB in all; PSS splits it between them.
+local SHARED_MMAP_256M = [[python3 -c "
+import mmap, os, tempfile, time
+f = tempfile.TemporaryFile()
+for _ in range(256):
+    f.write(b'\x01' * 2**20)
+f.flush()
+for _ in range(8):
+    if os.fork() == 0:
+        m = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+        sum(m[i] for i in range(0, len(m), 4096))
+        print('ready', flush=True)
+        time.sleep(30)
+        os._exit(0)
+time.sleep(30)
+"]]
+
+T["memory"]["charges pages its processes share only once"] = function()
+    if not vim.uv.fs_stat("/proc/self/smaps_rollup") then
+        MiniTest.skip("no /proc/<pid>/smaps_rollup")
+    end
+    local job = spawn(SHARED_MMAP_256M, { memory_limit = GiB, kill_ladder = SHORT_LADDER })
+    assert(
+        vim.wait(10000, function()
+            return job.stdout.line_count >= 8
+        end, 20),
+        "the children never mapped the file"
+    )
+    local procs = exec.parse_ps(vim.fn.system({ "ps", "-A", "-o", "pgid=,pid=,rss=" }))[job.pid]
+    local rss = 0
+    for _, proc in ipairs(procs) do
+        rss = rss + proc.rss
+    end
+    eq(rss > 2 * GiB, true)
+    -- Two samples after the mapping.
+    vim.wait(2500)
+    eq(job.terminating, false)
+    eq(job.stats.mem_bytes > 256 * MiB and job.stats.mem_bytes < GiB, true)
 end
 
 T["memory"]["resolves the limit"] = function()
@@ -478,11 +544,11 @@ T["memory"]["formats sizes in binary units"] = function()
     eq(exec.mem_size(8.3 * GiB), "8.3 GiB")
 end
 
-T["memory"]["samples the process group's RSS"] = function()
+T["memory"]["samples the process group's memory"] = function()
     local job = spawn("sleep 3")
     eq(
         vim.wait(2500, function()
-            return (job.stats.rss_bytes or 0) > 0
+            return (job.stats.mem_bytes or 0) > 0
         end, 50),
         true
     )
@@ -507,7 +573,7 @@ T["memory"]["leaves the group alone without a limit"] = function()
     local job = spawn(ALLOC_256M, { memory_limit = false, kill_ladder = SHORT_LADDER })
     eq(
         vim.wait(5000, function()
-            return (job.stats.rss_bytes or 0) > 128 * MiB
+            return (job.stats.mem_bytes or 0) > 128 * MiB
         end, 50),
         true
     )

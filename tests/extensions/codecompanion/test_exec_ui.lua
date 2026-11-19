@@ -346,9 +346,9 @@ T["progress line"]["renders a running job"] = function()
     local job = fake_job({
         started_at = now - 12000,
         timeout_ms = 30000,
-        stats = { out_lines = 1200, out_bytes = 3.4 * MiB, rss_bytes = 210 * MiB, last_output_at = now - 4000 },
+        stats = { out_lines = 1200, out_bytes = 3.4 * MiB, mem_bytes = 210 * MiB, last_output_at = now - 4000 },
     })
-    eq(exec_ui.render(job, now), { { "⏱ 12s/30s · 1.2k lines · 3 MiB · RSS 210 MiB · idle 4s", "Comment" } })
+    eq(exec_ui.render(job, now), { { "⏱ 12s/30s · 1.2k lines · 3 MiB · mem 210 MiB · idle 4s", "Comment" } })
 end
 
 T["progress line"]["renders how the job ended"] = function()
@@ -360,7 +360,10 @@ T["progress line"]["renders how the job ended"] = function()
     eq(text({ reason = "timeout", timeout_ms = 30000, exit_code = 130 }), { "timed out after 30s", "DiagnosticWarn" })
     eq(text({ reason = "cancelled", ended_at = 47400 })[1], "cancelled after 47s")
     eq(text({ reason = "stopped" })[1], "stopped")
-    eq(text({ reason = "memory", memory_peak = 8.3 * GiB, memory_limit = 8 * GiB })[1], "killed: RSS 8.3 GiB > 8 GiB")
+    eq(
+        text({ reason = "memory", memory_peak = 8.3 * GiB, memory_limit = 8 * GiB })[1],
+        "killed: memory 8.3 GiB > 8 GiB"
+    )
 end
 
 T["progress line"]["attach marks the label and puts the line above it"] = function()

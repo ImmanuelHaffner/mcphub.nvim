@@ -306,7 +306,7 @@ local function line_count(n)
 end
 
 --- The progress line: while the job runs, elapsed time against its timeout,
---- output, RSS and the time since the last output; once it has exited, how
+--- output, memory use and the time since the last output; once it has exited, how
 --- long it ran and how it ended, which the folded label's status icon would
 --- otherwise be the only sign of.
 ---@param job MCPHub.Exec.Job
@@ -324,7 +324,7 @@ function M.render(job, now, hint)
         elseif job.reason == "stopped" then
             text = "stopped"
         elseif job.reason == "memory" then
-            text = ("killed: RSS %s > %s"):format(exec.mem_size(job.memory_peak), exec.mem_size(job.memory_limit))
+            text = ("killed: memory %s > %s"):format(exec.mem_size(job.memory_peak), exec.mem_size(job.memory_limit))
         else
             text = ("%.1fs · exit %s"):format(ran / 1000, tostring(job.exit_code))
         end
@@ -337,8 +337,8 @@ function M.render(job, now, hint)
         elapsed = elapsed .. ("/%gs"):format(job.timeout_ms / 1000)
     end
     local parts = { elapsed, line_count(stats.out_lines), exec.mem_size(stats.out_bytes) }
-    if stats.rss_bytes then
-        parts[#parts + 1] = "RSS " .. exec.mem_size(stats.rss_bytes)
+    if stats.mem_bytes then
+        parts[#parts + 1] = "mem " .. exec.mem_size(stats.mem_bytes)
     end
     parts[#parts + 1] = ("idle %ds"):format(math.floor((now - (stats.last_output_at or job.started_at)) / 1000))
     if hint then
