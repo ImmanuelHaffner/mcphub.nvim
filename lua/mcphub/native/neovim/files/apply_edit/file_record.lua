@@ -20,7 +20,8 @@
 ---
 --- `M.read(path)` always sources content from a Neovim buffer. If a buffer
 --- exists for the path (regardless of whether it's modified), that buffer is
---- the source. Otherwise the path is loaded into a fresh buffer via
+--- the source, once brought up to date with the disk (`sync_with_disk`).
+--- Otherwise the path is loaded into a fresh buffer via
 --- `bufadd` + `bufload`. Reasons:
 ---
 ---   * Modified buffers carry unsaved changes the user is staring at. Reading
@@ -162,6 +163,8 @@ end
 --- @return mcphub.edit.FileRecord|nil record  On success.
 --- @return string|nil err                  On failure, the I/O error message. It names no path:
 ---                                         callers report it next to the path they asked for.
+--- @return string|nil reason               On failure, `"disk_conflict"` when the buffer has unsaved
+---                                         changes and the file changed on disk; nil for I/O errors.
 function M.read(path)
     if type(path) ~= "string" or path == "" then
         return nil, "path must be a non-empty string"
@@ -193,9 +196,37 @@ function M.read(path)
         if not ok then
             return nil, "cannot load: " .. tostring(err)
         end
+    elseif buffer.sync_with_disk(bufnr) == "conflict" then
+        -- A buffer already loaded may predate the file on disk. Without changes it has
+        -- just been reloaded; with changes, neither side can be read as the file.
+        return nil, "the file changed on disk and its buffer has unsaved changes in Neovim", "disk_conflict"
     end
 
     return M.from_buffer(bufnr), nil
+end
+
+--- The failure entry for a `read` that returned nil, shared by both tools.
+---
+--- @param path   string   The path as the caller asked for it.
+--- @param err    string?  `read`'s second return.
+--- @param reason string?  `read`'s third return.
+--- @return table  `{ reason, path, message, hint }`
+function M.read_failure(path, err, reason)
+    if reason == "disk_conflict" then
+        return {
+            reason = "disk_conflict",
+            path = path,
+            message = err,
+            hint = "the user's unsaved changes and the file on disk disagree, and only the user can "
+                .. "reconcile them. Ask them to save or discard the buffer, then re-read the file.",
+        }
+    end
+    return {
+        reason = "io_error",
+        path = path,
+        message = err or "file_record.read returned nil with no error",
+        hint = "verify the path exists and is readable; " .. "use neovim__write_file to create new files.",
+    }
 end
 
 --- Build a record from a path and an already-loaded content string.

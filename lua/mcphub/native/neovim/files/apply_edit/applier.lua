@@ -101,9 +101,12 @@
 ---     surfaced as `applied[]` or `rejected[]`. The batch continues
 ---     with subsequent files (this is a per-file refusal, not a
 ---     batch-level cancel).
+---   * `'write_failed'` — the blocks reached the buffer but writing it
+---     failed, so none reached the file. Reported like
+---     `precondition_failed`.
 ---
 --- @class mcphub.edit.applier.FileOutcome
---- @field status        string          'completed' | 'cancelled' | 'no_changes' | 'precondition_failed'
+--- @field status        string          'completed' | 'cancelled' | 'no_changes' | 'precondition_failed' | 'write_failed'
 --- @field cancel_reason string?         Present on cancelled.
 --- @field per_block     table<string, string>?  block_id → 'accepted' | 'rejected' | 'partial' | 'skipped'.
 --- @field failures      table[]?        Present on precondition_failed. Each entry
@@ -499,12 +502,17 @@ function M.apply_plan(plan, opts, drive_file, on_done)
                 -- reports `{ errors = 0, warnings = 0 }`.
                 diagnostic_counts = outcome.diagnostic_counts or { errors = 0, warnings = 0 },
                 -- The file as it is now, against what the model read; nil
-                -- when it cannot be read back. See `readback.lua`.
-                readback = readback.compare(path, rec.content, landed_blocks(blocks, outcome)),
+                -- when it cannot be read back. See `readback.lua`. After a
+                -- failed write the buffer is not the file, and reads would
+                -- show its unsaved edits as if they had landed.
+                readback = outcome.status ~= "write_failed"
+                        and readback.compare(path, rec.content, landed_blocks(blocks, outcome))
+                    or nil,
             }
 
-            if outcome.status == "precondition_failed" then
-                -- The driver refused to run this file's batch. Every block
+            if outcome.status == "precondition_failed" or outcome.status == "write_failed" then
+                -- The driver refused to run this file's batch, or its write
+                -- failed. Every block
                 -- in this file surfaces as `failed[]`; `applied[]` and
                 -- `rejected[]` get nothing. We forward `outcome.failures`
                 -- verbatim, with `path` filled in for any entry that

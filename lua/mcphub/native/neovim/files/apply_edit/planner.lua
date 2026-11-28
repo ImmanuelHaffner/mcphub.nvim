@@ -169,36 +169,32 @@ end
 --- @return table[]                            io_failures  One entry per op whose path failed to load.
 local function read_files(ops)
     local records, io_failures = {}, {}
-    local tried = {} -- abs path → 'failed' marker once we've seen it can't load
+    local tried = {} -- abs path → the failure's reason once we've seen it can't load
     for op_index, op in ipairs(ops) do
         local raw = op.path
         local abs = vim.fn.fnamemodify(raw, ":p")
 
-        if records[abs] == nil and tried[abs] ~= "failed" then
-            local rec, err = file_record.read(abs)
+        if records[abs] == nil and tried[abs] == nil then
+            local rec, err, reason = file_record.read(abs)
             if rec then
                 records[abs] = rec
             else
-                tried[abs] = "failed"
                 -- Record this failure and skip; subsequent ops with the same
                 -- path will get their own failure entry pointing at the
                 -- same root cause.
-                io_failures[#io_failures + 1] = {
-                    op_index = op_index,
-                    path = raw,
-                    reason = schema.ERROR_REASONS.io_error,
-                    message = err or "file_record.read returned nil with no error",
-                    hint = "verify the path exists and is readable; " .. "use neovim__write_file to create new files.",
-                }
+                local failure = file_record.read_failure(raw, err, reason)
+                failure.op_index = op_index
+                tried[abs] = failure.reason
+                io_failures[#io_failures + 1] = failure
             end
-        elseif tried[abs] == "failed" then
+        elseif tried[abs] ~= nil then
             -- Subsequent op referencing the same broken path. Still surface
             -- it so the LLM doesn't have to re-derive that all ops on this
             -- path failed together.
             io_failures[#io_failures + 1] = {
                 op_index = op_index,
                 path = raw,
-                reason = schema.ERROR_REASONS.io_error,
+                reason = tried[abs],
                 message = "the file could not be loaded (see the earlier op on it)",
                 hint = "this op shares its target path with an earlier failed op; fix that one first.",
             }

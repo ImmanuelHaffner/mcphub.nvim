@@ -242,7 +242,8 @@ regex: `^[0-9a-f]{7}$`.
 ### Buffer-first I/O
 
 Reads come from the loaded buffer if one exists, regardless of
-modified state. Disk content is a fallback. Writes go through
+modified state, once `sync_with_disk` has brought it up to date with
+the file (see *Footguns*). Disk content is a fallback. Writes go through
 `:write` (mcphub's `EditUI` does the actual write), which triggers
 `BufWritePre` autocmds and any format-on-save hooks. Our code never
 touches the filesystem directly.
@@ -439,6 +440,8 @@ is for — see its header for why that table has to be callable.
 | `test_<module>.lua`                | One spec per engine module: `schema`, `planner`, `anchors`, `read`, `json`, `indent`, `file_record`, `fingerprint`. |
 | `test_ui_backend.lua`              | Unit tests for the bridge helpers. May import mcphub.          |
 | `test_widen_conflict.lua`          | Regression test for the post-widen collision class.           |
+| `test_stale_apply.lua`             | A file edited in Neovim or on disk while an earlier file of the batch is under review. |
+| `test_disk_drift.lua`              | A file changed on disk behind a loaded buffer: no prompt, no write through a conflict, no failed write reported applied. |
 
 Engine specs must not reach outside `apply_edit/*` — no `EditUI`, no
 `mcphub.state`; the two bridge specs may. Nothing enforces that beyond the
@@ -584,6 +587,39 @@ was replaced (a `content_encoding_lossy` warning line on
 apply_edit, a `warning:` header line on read_with_fingerprint). Do NOT
 go back to a bare `pcall(vim.json.encode, response)` at either
 handler — that reopens this bug. Covered by `test_json.lua`.
+
+### A loaded buffer can be behind its file
+
+Neovim notices a file changing on disk only through `checktime`, and
+`check_timestamps` skips every buffer not shown in a window. A buffer
+`load_hidden` loaded therefore never catches up with an agent's `sed -i`,
+a `git checkout` or a formatter run from the shell, and a shown one only
+at the next `checktime` trigger. Buffer-first reads then hand out stale
+content with a fingerprint that matches it, the edit is planned and
+applied against it, and the `:write` stops at "The file has been changed
+since reading it!!! Do you really want to write to it (y/n)?". Worse, a
+`FocusGained` `checktime` while that prompt waits sees the now modified
+buffer (it sits in `nvim_buf_call`'s autocmd window, which counts as
+shown) and raises W12 on top; choosing Load reloads the buffer mid-write,
+`y` writes the disk content back without the edit, and the edit was
+reported applied.
+
+`utils.buffer.sync_with_disk(bufnr)` closes this. It runs
+`:checktime {bufnr}`, which checks that buffer at once whether shown or
+not, under a buffer-local `FileChangedShell` autocmd that answers in
+place of the dialogs: a buffer without changes is reloaded, one with
+changes is reported as `conflict` and remembered as such (`checktime`
+reports a change once) until it is read or written again. It runs in
+`file_record.read` (an already-loaded buffer), at the top of
+`drive_file`, in `EditUI:_open`'s stale check, and in
+`write_if_modified` right before `:write`, which refuses rather than
+writes through a conflict.
+
+`write_if_modified` also used to swallow every `:write` error but E212,
+so a refused or failed write completed the session as if it had landed.
+It now returns the error, and a buffer still modified after `:write`
+counts as one; `EditUI` passes it to `on_complete`, which `drive_file`
+turns into a `write_failed` outcome. Covered by `test_disk_drift.lua`.
 
 ### An empty file reads as one empty line
 

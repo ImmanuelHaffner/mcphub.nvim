@@ -1,3 +1,4 @@
+local buf_utils = require("mcphub.native.neovim.utils.buffer")
 local focus_gate = require("mcphub.native.neovim.files.edit_file.focus_gate")
 local keymap_utils = require("mcphub.native.neovim.utils.keymap")
 local text = require("mcphub.utils.text")
@@ -354,8 +355,12 @@ end
 function EditUI:_open(opts)
     -- The user may have moved on while the review waited; completion returns here.
     local origin_winnr = vim.api.nvim_get_current_win()
-    local buf_utils = require("mcphub.native.neovim.utils.buffer")
     local function is_stale(b)
+        -- A buffer behind its file is reloaded first, so that the hash compares the file.
+        local disk = buf_utils.sync_with_disk(b)
+        if disk == "conflict" or disk == "deleted" then
+            return true
+        end
         return opts.reference_hash and buf_utils.content_hash(b) ~= opts.reference_hash
     end
     local function refuse(b)
@@ -959,26 +964,48 @@ function EditUI:_reject_all_remaining_hunks()
     self:_complete_session()
 end
 
+--- Write the edited buffer, if it has changes.
+---@return string? error Why the changes did not reach the file; nil once they did.
 function EditUI:write_if_modified()
     local file = self.state.file_path
     local bufnr = self.state.bufnr
     local buf_state = vim.bo[bufnr]
-    if file and (buf_state and buf_state.modified) then
-        -- `:write` writes the current buffer, which need not be this one: an
-        -- auto-approved edit never shows its buffer in a window. No file argument:
-        -- a buffer created before its directory existed keeps an unresolved name,
-        -- and `:write {file}` would take the canonical path for another file.
-        vim.api.nvim_buf_call(bufnr, function()
-            local ok, err = pcall(vim.cmd.write)
-            if not ok and err:match("E212") then
-                local dir = vim.fn.fnamemodify(file, ":h")
-                if vim.fn.isdirectory(dir) == 0 then
-                    vim.fn.mkdir(dir, "p")
-                end
-                vim.cmd.write()
-            end
-        end)
+    if not (file and buf_state and buf_state.modified) then
+        return nil
     end
+    -- The file may have changed on disk since the buffer was read, e.g. during the review.
+    -- `:write` would then ask whether to overwrite it, and a reload slipping in while it
+    -- asks would write the file back without the changes; refuse instead.
+    local disk = buf_utils.sync_with_disk(bufnr)
+    if disk == "conflict" then
+        return string.format("`%s` changed on disk while it was being edited; it was not written.", file)
+    elseif disk == "deleted" then
+        return string.format("`%s` was deleted while it was being edited; it was not written.", file)
+    end
+    -- `:write` writes the current buffer, which need not be this one: an
+    -- auto-approved edit never shows its buffer in a window. No file argument:
+    -- a buffer created before its directory existed keeps an unresolved name,
+    -- and `:write {file}` would take the canonical path for another file.
+    local ok, err = pcall(vim.api.nvim_buf_call, bufnr, function()
+        local written, write_err = pcall(vim.cmd.write)
+        if not written and tostring(write_err):match("E212") then
+            local dir = vim.fn.fnamemodify(file, ":h")
+            if vim.fn.isdirectory(dir) == 0 then
+                vim.fn.mkdir(dir, "p")
+            end
+            vim.cmd.write()
+        elseif not written then
+            error(write_err, 0)
+        end
+    end)
+    if not ok then
+        return string.format("writing `%s` failed: %s", file, tostring(err))
+    end
+    -- A `:write` the user declined, or one a `BufWriteCmd` swallowed, raises nothing.
+    if vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].modified then
+        return string.format("`%s` was not written; its buffer still has unsaved changes.", file)
+    end
+    return nil
 end
 
 -- Navigate to next hunk
@@ -1432,12 +1459,12 @@ function EditUI:_complete_session()
     end
     self.state.has_completed = true
     self:_remove_row()
-    self:write_if_modified()
+    local write_error = self:write_if_modified()
     vim.schedule(function()
         local origin_winnr = self.state.origin_winnr
         local windowless = self.state.windowless
-        -- Signal completion to the session without arguments
-        self.state.callbacks.on_complete()
+        -- The session decides how to report a write that failed; the review itself is over.
+        self.state.callbacks.on_complete(write_error)
         -- A session that never left the user's window has nothing to go back to.
         if
             not windowless

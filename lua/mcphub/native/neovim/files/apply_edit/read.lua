@@ -237,14 +237,9 @@ function M.read_with_fingerprint(path, opts)
         return range_failure
     end
 
-    local rec, err = file_record.read(path)
+    local rec, err, reason = file_record.read(path)
     if not rec then
-        return failure("cannot read the file", {
-            reason = schema.ERROR_REASONS.io_error,
-            path = path,
-            message = err or "file_record.read returned nil with no error",
-            hint = "verify the path exists and is readable; " .. "use neovim__write_file to create new files.",
-        })
+        return failure("cannot read the file", file_record.read_failure(path, err, reason))
     end
 
     local total_lines = rec.n_lines

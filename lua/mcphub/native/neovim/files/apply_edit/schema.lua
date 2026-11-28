@@ -92,6 +92,10 @@ M.ERROR_REASONS = {
     range_conflict = "range_conflict", -- two ops claim overlapping ranges in one file
     io_error = "io_error", -- could not read the file
     stale_fingerprint = "stale_fingerprint", -- op's `baseline_fingerprint` does not match current file fingerprint
+    disk_conflict = "disk_conflict", -- the file changed on disk while its buffer has unsaved changes
+
+    -- Apply reasons (raised by ui_backend.lua).
+    write_failed = "write_failed", -- the edits reached the buffer, but writing it to disk failed
 
     -- read-side reasons (raised by mcphub.native.neovim.files.apply_edit.read).
     invalid_range = "invalid_range", -- start_line > end_line; a malformed range pair

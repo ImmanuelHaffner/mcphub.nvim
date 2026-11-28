@@ -186,7 +186,11 @@ function EditSession:start(options)
                 )
             )
         end,
-        on_complete = function()
+        on_complete = function(write_error)
+            if write_error then
+                self.ui:cleanup()
+                return self:_handle_error(write_error .. " The changes are in the unsaved buffer, not in the file.")
+            end
             self:_generate_final_report(false, function(report)
                 self.callbacks.on_success("# EDIT SESSION\n\n" .. report)
                 self.ui:cleanup()

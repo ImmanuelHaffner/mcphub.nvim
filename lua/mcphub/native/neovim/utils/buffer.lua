@@ -227,6 +227,88 @@ function M.content_hash(bufnr)
     return vim.fn.sha256((M.normalised_content(bufnr)))
 end
 
+--- Remember that `bufnr` holds changes made against a version of its file that is no
+--- longer on disk, until it is read or written again. Needed because `:checktime` reports
+--- a change once: it records the new timestamp, so asking again finds nothing.
+---@param bufnr integer
+local function mark_conflict(bufnr)
+    vim.b[bufnr].mcphub_disk_conflict = true
+    local group = vim.api.nvim_create_augroup("mcphub_disk_conflict_" .. bufnr, { clear = true })
+    vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost", "BufUnload" }, {
+        group = group,
+        buffer = bufnr,
+        callback = function()
+            pcall(function()
+                vim.b[bufnr].mcphub_disk_conflict = nil
+            end)
+            pcall(vim.api.nvim_del_augroup_by_id, group)
+        end,
+    })
+end
+
+--- Bring a loaded buffer up to date with its file, without a prompt.
+---
+--- Neovim notices a file changing on disk only through `checktime`, which skips every
+--- buffer not shown in a window: a buffer loaded hidden keeps the content it was loaded
+--- with for good, and a shown one until the next check. Reading such a buffer lies about
+--- the file, and writing it stops at "The file has been changed since reading it" — or,
+--- if a reload slips in while that prompt waits, writes the file back without the edit.
+---
+--- A buffer without changes is reloaded. One with changes is left alone and reported as a
+--- conflict, which it stays until it is read or written again, or its changes are undone.
+--- The check is Neovim's own (`:checktime {bufnr}`), with a `FileChangedShell` autocmd
+--- answering in place of the W11/W12 dialogs.
+---@param bufnr integer A loaded buffer
+---@return "unchanged"|"reloaded"|"conflict"|"deleted"
+function M.sync_with_disk(bufnr)
+    if
+        not vim.api.nvim_buf_is_loaded(bufnr)
+        or vim.bo[bufnr].buftype ~= ""
+        or vim.api.nvim_buf_get_name(bufnr) == ""
+    then
+        return "unchanged"
+    end
+    if vim.b[bufnr].mcphub_disk_conflict then
+        if vim.bo[bufnr].modified then
+            return "conflict"
+        end
+        -- The changes were undone; the timestamp is already recorded, so reload by hand.
+        vim.b[bufnr].mcphub_disk_conflict = nil
+        vim.api.nvim_buf_call(bufnr, function()
+            vim.cmd("silent edit!")
+        end)
+        return "reloaded"
+    end
+
+    local tick = vim.b[bufnr].changedtick
+    local reason
+    local group = vim.api.nvim_create_augroup("mcphub_sync_with_disk", { clear = true })
+    vim.api.nvim_create_autocmd("FileChangedShell", {
+        group = group,
+        buffer = bufnr,
+        callback = function()
+            reason = vim.v.fcs_reason
+            vim.v.fcs_choice = (reason == "conflict" or reason == "deleted") and "" or "reload"
+        end,
+    })
+    -- With a count, `:checktime` checks that buffer at once, shown or not; without one it
+    -- would skip hidden buffers, and postpone the check when not typed.
+    local ok, err = pcall(vim.cmd, "checktime " .. bufnr)
+    pcall(vim.api.nvim_del_augroup_by_id, group)
+    if not ok then
+        error(err, 0)
+    end
+
+    if reason == "conflict" then
+        mark_conflict(bufnr)
+        return "conflict"
+    elseif reason == "deleted" then
+        return "deleted"
+    end
+    -- `'autoread'` reloads an unchanged buffer without asking the autocmd.
+    return vim.b[bufnr].changedtick ~= tick and "reloaded" or "unchanged"
+end
+
 ---Open file in editor and get target window
 ---@param file_path string The path to the file to open
 ---@return number|nil The buffer number of the opened file, or nil if not found

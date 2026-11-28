@@ -760,14 +760,14 @@ local function resolve_config(config)
     }
 end
 
---- Outcome for a file whose buffer no longer holds the content its blocks were
---- located in. Nothing has been applied. The failures mirror the planner's
---- `stale_fingerprint` entries, one per op: an op can span several blocks.
+--- Outcome refusing every op of a file, one failure per op: an op can span several blocks.
 ---
 --- @param request mcphub.edit.applier.FileRequest
+--- @param reason  string
+--- @param message string
+--- @param hint    string
 --- @return mcphub.edit.applier.FileOutcome
-local function stale_outcome(request)
-    local baseline = fingerprint.compute(request.original_content)
+local function refusal(request, reason, message, hint)
     local failures, seen = {}, {}
     for _, b in ipairs(request.blocks) do
         for _, m in ipairs(blocks_mod.members(b)) do
@@ -775,23 +775,72 @@ local function stale_outcome(request)
                 seen[m.op_index] = true
                 failures[#failures + 1] = {
                     op_index = m.op_index,
-                    reason = schema.ERROR_REASONS.stale_fingerprint,
+                    reason = reason,
                     path = request.file_path,
-                    baseline_fingerprint = baseline,
-                    message = "the file changed after the batch was planned; this op was not applied.",
-                    hint = "the file changed while this edit waited to be applied. "
-                        .. "Re-read it with neovim__read_with_fingerprint and replan "
-                        .. "against the current content.",
+                    message = message,
+                    hint = hint,
                 }
             end
         end
     end
-    return {
-        status = "precondition_failed",
-        failures = failures,
-        per_block = {},
-        ui_summary = string.format("refused `%s`: it changed after the batch was planned", request.file_path),
-    }
+    return { status = "precondition_failed", failures = failures, per_block = {} }
+end
+
+--- Outcome for a file whose buffer no longer holds the content its blocks were
+--- located in. Nothing has been applied.
+---
+--- @param request mcphub.edit.applier.FileRequest
+--- @return mcphub.edit.applier.FileOutcome
+local function stale_outcome(request)
+    local outcome = refusal(
+        request,
+        schema.ERROR_REASONS.stale_fingerprint,
+        "the file changed after the batch was planned; this op was not applied.",
+        "the file changed while this edit waited to be applied. "
+            .. "Re-read it with neovim__read_with_fingerprint and replan "
+            .. "against the current content."
+    )
+    local baseline = fingerprint.compute(request.original_content)
+    for _, f in ipairs(outcome.failures) do
+        f.baseline_fingerprint = baseline
+    end
+    outcome.ui_summary = string.format("refused `%s`: it changed after the batch was planned", request.file_path)
+    return outcome
+end
+
+--- Outcome for a file that changed on disk while its buffer has unsaved changes.
+---
+--- @param request mcphub.edit.applier.FileRequest
+--- @return mcphub.edit.applier.FileOutcome
+local function conflict_outcome(request)
+    local outcome = refusal(
+        request,
+        schema.ERROR_REASONS.disk_conflict,
+        "the file changed on disk and its buffer has unsaved changes in Neovim; this op was not applied.",
+        "the user's unsaved changes and the file on disk disagree, and only the user can reconcile "
+            .. "them. Ask them to save or discard the buffer, then re-read the file."
+    )
+    outcome.ui_summary = string.format("refused `%s`: it changed on disk under unsaved changes", request.file_path)
+    return outcome
+end
+
+--- Outcome for a file whose edits reached its buffer but not the disk. The buffer keeps
+--- them, unsaved, so that nothing the review decided is lost.
+---
+--- @param request mcphub.edit.applier.FileRequest
+--- @param err     string  Why the write failed.
+--- @return mcphub.edit.applier.FileOutcome
+local function write_failed_outcome(request, err)
+    local outcome = refusal(
+        request,
+        schema.ERROR_REASONS.write_failed,
+        err .. " The edits are in the unsaved buffer, not in the file.",
+        "tell the user; do not retry the edit, or it would apply twice to the buffer. "
+            .. "Once they have saved or discarded the buffer, re-read the file."
+    )
+    outcome.status = "write_failed"
+    outcome.ui_summary = err
+    return outcome
 end
 
 --- Drive one file's edits through `EditUI`. Implements the `drive_file`
@@ -807,17 +856,17 @@ function M.drive_file(request, file_cb, config)
     -- batch may have been under review since, and the user may have edited this one
     -- meanwhile; widening and the collision check below read the live buffer, so
     -- refuse before either sees content the blocks do not describe. The buffer may
-    -- also have been unloaded meanwhile, and an unloaded buffer reads as empty.
+    -- also have been unloaded meanwhile, and an unloaded buffer reads as empty. The
+    -- file may have changed on disk too, which a hidden buffer never notices by itself.
     request.bufnr = buffer.load_hidden(request.file_path) or request.bufnr
+    local disk = buffer.sync_with_disk(request.bufnr)
+    if disk == "conflict" then
+        return file_cb(conflict_outcome(request))
+    end
     local reference_hash = vim.fn.sha256(request.original_content)
-    if buffer.content_hash(request.bufnr) ~= reference_hash then
+    if disk == "deleted" or buffer.content_hash(request.bufnr) ~= reference_hash then
         return file_cb(stale_outcome(request))
     end
-
-    -- Note: `EditUI` is required lazily below (just before instantiation),
-    -- not at function entry, so collision-detection and no-changes paths
-    -- can complete without mcphub's full plugin tree on `runtimepath`.
-    -- Useful for tests that exercise refusal semantics under `-u NONE`.
 
     -- Note: `EditUI` is required lazily below (just before instantiation),
     -- not at function entry, so collision-detection and no-changes paths
@@ -994,7 +1043,11 @@ function M.drive_file(request, file_cb, config)
             ui:cleanup()
             file_cb(stale_outcome(request))
         end,
-        on_complete = function()
+        on_complete = function(write_error)
+            if write_error then
+                ui:cleanup()
+                return file_cb(write_failed_outcome(request, write_error))
+            end
             finalise("completed", nil)
         end,
         on_cancel = function(reason)
